@@ -62,6 +62,41 @@ class Plugin {
     private $jetengine_query_optimizer;
     
     /**
+     * SharedStatsCache for preventing duplicate queries between components
+     */
+    private $shared_stats_cache;
+    
+    /**
+     * BunnyCDN manager instance
+     */
+    private $bunny_cdn_manager;
+    
+    /**
+     * BunnyCDN migrator instance
+     */
+    private $bunnycdn_migrator;
+    
+    /**
+     * Media library enhancer instance
+     */
+    private $media_library_enhancer;
+    
+    /**
+     * BunnyCDN cron sync instance
+     */
+    private $bunnycdn_cron_sync;
+    
+    /**
+     * BunnyCDN sync controller instance
+     */
+    private $bunnycdn_sync_controller;
+    
+    /**
+     * BunnyCDN content rewriter instance
+     */
+    private $bunnycdn_content_rewriter;
+    
+    /**
      * Get plugin instance (singleton)
      */
     public static function getInstance() {
@@ -94,6 +129,22 @@ class Plugin {
         $this->lazy_load_manager = new LazyLoadManager();
         $this->jetengine_query_optimizer = new JetEngineQueryOptimizer();
         
+        // Initialize BunnyCDN manager
+        $this->bunny_cdn_manager = new BunnyCDNManager();
+        
+        // Initialize media library enhancer
+        $this->media_library_enhancer = new MediaLibraryEnhancer($this->bunny_cdn_manager);
+        $this->media_library_enhancer->init_hooks();
+        
+        // Initialize BunnyCDN cron sync
+        $this->bunnycdn_cron_sync = new BunnyCDNCronSync($this->bunny_cdn_manager);
+        
+        // Initialize BunnyCDN sync controller for manual sync
+        $this->bunnycdn_sync_controller = new BunnyCDNSyncController($this->bunny_cdn_manager);
+        
+        // Initialize BunnyCDN content rewriter
+        $this->bunnycdn_content_rewriter = new BunnyCDNContentRewriter();
+        
         // Connect upload preprocessor to cache manager for fast lookups
         $this->cache_manager->set_upload_preprocessor($this->upload_preprocessor);
         
@@ -102,6 +153,9 @@ class Plugin {
         
         // Connect custom lookup table to upload preprocessor for population
         $this->upload_preprocessor->set_custom_lookup_table($this->custom_lookup_table);
+        
+        // Connect BunnyCDN manager to upload preprocessor for CDN uploads
+        $this->upload_preprocessor->set_bunny_cdn_manager($this->bunny_cdn_manager);
         
         // Connect JetEngine preloader to optimization components
         $this->jetengine_preloader->set_cache_manager($this->cache_manager);
@@ -119,6 +173,12 @@ class Plugin {
             $this->admin_interface->set_transient_manager($this->transient_manager);
             $this->admin_interface->set_lazy_load_manager($this->lazy_load_manager);
             $this->admin_interface->set_jetengine_query_optimizer($this->jetengine_query_optimizer);
+            $this->admin_interface->set_bunny_cdn_manager($this->bunny_cdn_manager);
+            $this->admin_interface->set_bunnycdn_cron_sync($this->bunnycdn_cron_sync);
+            
+            // Initialize BunnyCDN migrator
+            $this->bunnycdn_migrator = new BunnyCDNMigrator($this->bunny_cdn_manager);
+            $this->bunnycdn_migrator->register_admin_menu();
         }
         
         // Hook into WordPress init
@@ -262,6 +322,58 @@ class Plugin {
      */
     public function get_jetengine_query_optimizer() {
         return $this->jetengine_query_optimizer;
+    }
+    
+    /**
+     * Get shared stats cache instance
+     */
+    public function get_shared_stats_cache() {
+        if (!$this->shared_stats_cache) {
+            $this->shared_stats_cache = new SharedStatsCache();
+        }
+        return $this->shared_stats_cache;
+    }
+    
+    /**
+     * Get BunnyCDN manager instance
+     */
+    public function get_bunny_cdn_manager() {
+        return $this->bunny_cdn_manager;
+    }
+    
+    /**
+     * Get BunnyCDN migrator instance
+     */
+    public function get_bunnycdn_migrator() {
+        return $this->bunnycdn_migrator;
+    }
+    
+    /**
+     * Get media library enhancer instance
+     */
+    public function get_media_library_enhancer() {
+        return $this->media_library_enhancer;
+    }
+    
+    /**
+     * Get BunnyCDN cron sync instance
+     */
+    public function get_bunnycdn_cron_sync() {
+        return $this->bunnycdn_cron_sync;
+    }
+    
+    /**
+     * Get BunnyCDN sync controller instance
+     */
+    public function get_bunnycdn_sync_controller() {
+        return $this->bunnycdn_sync_controller;
+    }
+    
+    /**
+     * Get BunnyCDN content rewriter instance
+     */
+    public function get_bunnycdn_content_rewriter() {
+        return $this->bunnycdn_content_rewriter;
     }
     
     /**

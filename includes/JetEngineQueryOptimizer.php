@@ -46,23 +46,60 @@ class JetEngineQueryOptimizer {
      * Constructor
      */
     public function __construct() {
-        $this->init_hooks();
+        // Safety check: Ensure init_hooks method is accessible
+        if (!method_exists($this, 'init_hooks')) {
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('ALO: JetEngineQueryOptimizer - init_hooks method does not exist');
+            }
+            return;
+        }
+        
+        // Check method visibility for debugging
+        $reflection = new \ReflectionMethod($this, 'init_hooks');
+        if (!$reflection->isPublic()) {
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('ALO: JetEngineQueryOptimizer - init_hooks method is not public, fixing...');
+            }
+            // This should not happen, but just in case, we'll call it directly instead
+            $this->init_hooks();
+            return;
+        }
+        
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+            error_log('ALO: JetEngineQueryOptimizer - Constructor called, registering init_hooks');
+        }
+        
+        // Delay initialization until JetEngine is available
+        add_action('plugins_loaded', [$this, 'init_hooks'], 20);
     }
     
     /**
      * Initialize optimization hooks
      */
-    private function init_hooks() {
+    public function init_hooks() {
         // Enable/disable based on admin setting
         $this->optimization_enabled = apply_filters('alo_jetengine_query_optimization_enabled', true);
         
         if (!$this->optimization_enabled || !$this->is_jetengine_active()) {
+            // Log why optimization is not being enabled
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                if (!$this->optimization_enabled) {
+                    error_log('ALO: JetEngine Query Optimization disabled by setting');
+                } elseif (!$this->is_jetengine_active()) {
+                    error_log('ALO: JetEngine not detected, query optimization skipped');
+                }
+            }
             return;
         }
         
-        // Hook into JetEngine query building
-        add_filter('jet-engine/query-builder/query/args', [$this, 'optimize_query_args'], 10, 2);
-        add_filter('jet-engine/listing/grid/query-args', [$this, 'optimize_listing_query'], 10, 2);
+        // Log that we're initializing JetEngine optimization
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+            error_log('ALO: Initializing JetEngine Query Optimization hooks');
+        }
+        
+        // Hook into JetEngine query building with higher priority to ensure we run first
+        add_filter('jet-engine/query-builder/query/args', [$this, 'optimize_query_args'], 5, 2);
+        add_filter('jet-engine/listing/grid/query-args', [$this, 'optimize_listing_query'], 5, 2);
         
         // Meta query optimization
         add_filter('jet-engine/meta-fields/query', [$this, 'optimize_meta_query'], 10, 3);
@@ -82,16 +119,27 @@ class JetEngineQueryOptimizer {
         // Query caching
         add_filter('jet-engine/query-builder/query/cache-key', [$this, 'optimize_cache_key'], 10, 2);
         
+        // Alternative hooks for different JetEngine versions
+        add_filter('jet-engine/listings/data/post-data', [$this, 'track_listing_data_access'], 10, 2);
+        add_filter('jet-engine/query-builder/queries/get-query-args', [$this, 'optimize_query_args'], 5, 2);
+        
         // Performance monitoring
         add_action('wp_footer', [$this, 'log_optimization_stats'], 999);
         add_action('admin_footer', [$this, 'log_optimization_stats'], 999);
+        
+        // Initialize monitoring with current request
+        $this->init_request_monitoring();
     }
     
     /**
-     * Check if JetEngine is active
+     * Initialize request monitoring
      */
-    private function is_jetengine_active() {
-        return class_exists('Jet_Engine') || function_exists('jet_engine');
+    private function init_request_monitoring() {
+        // Track that we've initialized for this request
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+            $jetengine_version = defined('JET_ENGINE_VERSION') ? JET_ENGINE_VERSION : 'unknown';
+            error_log("ALO: JetEngine Query Optimization active (JetEngine v{$jetengine_version})");
+        }
     }
     
     /**
@@ -128,9 +176,12 @@ class JetEngineQueryOptimizer {
     public function optimize_listing_query($args, $settings) {
         $start_time = microtime(true);
         
+        // Extract settings if we received a listing object instead of array
+        $settings_array = $this->extract_settings_from_input($settings);
+        
         // Only select necessary fields for listings
         if (!isset($args['fields'])) {
-            $args['fields'] = $this->get_required_listing_fields($settings);
+            $args['fields'] = $this->get_required_listing_fields($settings_array);
         }
         
         // Optimize posts_per_page for performance
@@ -141,13 +192,49 @@ class JetEngineQueryOptimizer {
         // Disable unnecessary features for performance
         $args['update_post_meta_cache'] = false;
         $args['update_post_term_cache'] = false;
-        $args['no_found_rows'] = isset($settings['disable_pagination']) && $settings['disable_pagination'];
+        $args['no_found_rows'] = isset($settings_array['disable_pagination']) && $settings_array['disable_pagination'];
         
         $end_time = microtime(true);
         $this->stats['queries_optimized']++;
         $this->stats['query_time_saved'] += ($end_time - $start_time) * 1000;
         
         return $args;
+    }
+    
+    /**
+     * Extract settings from input (either array or listing object)
+     */
+    private function extract_settings_from_input($input) {
+        // If it's already an array, return as-is
+        if (is_array($input)) {
+            return $input;
+        }
+        
+        // If it's a JetEngine listing object, extract settings
+        if (is_object($input)) {
+            try {
+                // Try different methods to get settings from JetEngine objects
+                if (method_exists($input, 'get_settings')) {
+                    $settings = $input->get_settings();
+                    return is_array($settings) ? $settings : [];
+                } elseif (method_exists($input, 'get_meta')) {
+                    $meta = $input->get_meta();
+                    return is_array($meta) ? $meta : [];
+                } elseif (property_exists($input, 'settings') && is_array($input->settings)) {
+                    return $input->settings;
+                } elseif (property_exists($input, '_settings') && is_array($input->_settings)) {
+                    return $input->_settings;
+                }
+            } catch (Exception $e) {
+                // Log the error but don't break functionality
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    error_log('ALO: Error extracting settings from JetEngine object: ' . $e->getMessage());
+                }
+            }
+        }
+        
+        // Fallback to empty array if we can't extract settings
+        return [];
     }
     
     /**
@@ -179,8 +266,11 @@ class JetEngineQueryOptimizer {
      * Check if listing uses content field
      */
     private function listing_uses_content($settings) {
+        // Extract settings if we received a listing object instead of array
+        $settings_array = $this->extract_settings_from_input($settings);
+        
         // Check listing template for content usage
-        $template = $settings['listing_template'] ?? '';
+        $template = $settings_array['listing_template'] ?? '';
         
         return strpos($template, 'post_content') !== false || 
                strpos($template, 'dynamic-field="post_content"') !== false ||
@@ -191,7 +281,10 @@ class JetEngineQueryOptimizer {
      * Check if listing uses excerpt field
      */
     private function listing_uses_excerpt($settings) {
-        $template = $settings['listing_template'] ?? '';
+        // Extract settings if we received a listing object instead of array
+        $settings_array = $this->extract_settings_from_input($settings);
+        
+        $template = $settings_array['listing_template'] ?? '';
         
         return strpos($template, 'post_excerpt') !== false || 
                strpos($template, 'dynamic-field="post_excerpt"') !== false ||
@@ -202,7 +295,10 @@ class JetEngineQueryOptimizer {
      * Check if listing uses author field
      */
     private function listing_uses_author($settings) {
-        $template = $settings['listing_template'] ?? '';
+        // Extract settings if we received a listing object instead of array
+        $settings_array = $this->extract_settings_from_input($settings);
+        
+        $template = $settings_array['listing_template'] ?? '';
         
         return strpos($template, 'post_author') !== false || 
                strpos($template, 'author') !== false;
@@ -448,6 +544,9 @@ class JetEngineQueryOptimizer {
      * Check if listing is simple enough to skip nested queries
      */
     private function is_simple_listing($settings) {
+        // Extract settings if we received a listing object instead of array
+        $settings_array = $this->extract_settings_from_input($settings);
+        
         // Simple listings are those without complex relationships or meta queries
         $complex_features = [
             'meta_query',
@@ -457,7 +556,7 @@ class JetEngineQueryOptimizer {
         ];
         
         foreach ($complex_features as $feature) {
-            if (!empty($settings[$feature])) {
+            if (!empty($settings_array[$feature])) {
                 return false;
             }
         }
@@ -513,20 +612,20 @@ class JetEngineQueryOptimizer {
     /**
      * Monitor query start for performance tracking
      */
-    public function monitor_query_start($query, $args) {
+    public function monitor_query_start($query, $args = null) {
         $query_id = spl_object_id($query);
         
         $this->query_monitor[$query_id] = [
             'start_time' => microtime(true),
             'memory_start' => memory_get_usage(),
-            'args' => $args
+            'args' => $args ?: []
         ];
     }
     
     /**
      * Monitor query end for performance tracking
      */
-    public function monitor_query_end($query, $args) {
+    public function monitor_query_end($query, $args = null) {
         $query_id = spl_object_id($query);
         
         if (!isset($this->query_monitor[$query_id])) {
@@ -540,8 +639,8 @@ class JetEngineQueryOptimizer {
         $execution_time = ($end_time - $monitor_data['start_time']) * 1000;
         $memory_used = $memory_end - $monitor_data['memory_start'];
         
-        // Track savings if optimization was applied
-        if ($this->was_query_optimized($monitor_data['args'], $args)) {
+        // Track savings if optimization was applied (only if we have args to compare)
+        if ($args && $this->was_query_optimized($monitor_data['args'], $args)) {
             $this->stats['query_time_saved'] += $execution_time * 0.2; // Estimate 20% savings
             $this->stats['memory_saved'] += $memory_used * 0.15; // Estimate 15% memory savings
         }
@@ -670,5 +769,84 @@ class JetEngineQueryOptimizer {
      */
     public function clear_field_cache() {
         $this->field_cache = [];
+    }
+    
+    /**
+     * Check if JetEngine is active
+     */
+    private function is_jetengine_active() {
+        // Check for JetEngine class (most reliable)
+        if (class_exists('Jet_Engine')) {
+            return true;
+        }
+        
+        // Check for JetEngine constant
+        if (defined('JET_ENGINE_VERSION')) {
+            return true;
+        }
+        
+        // Check for JetEngine functions
+        if (function_exists('jet_engine')) {
+            return true;
+        }
+        
+        // Check if JetEngine plugin file is active
+        if (function_exists('is_plugin_active') && is_plugin_active('jet-engine/jet-engine.php')) {
+            return true;
+        }
+        
+        // Check for JetEngine specific hooks/filters existence
+        if (has_filter('jet-engine/query-builder/query/args')) {
+            return true;
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Track listing data access for performance monitoring
+     */
+    public function track_listing_data_access($data, $object) {
+        // Track when JetEngine accesses post data for optimization insights
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+            static $data_access_count = 0;
+            $data_access_count++;
+            
+            // Log every 10 accesses to avoid spam
+            if ($data_access_count % 10 === 0) {
+                error_log("ALO: JetEngine data access count: {$data_access_count}");
+            }
+        }
+        
+        return $data;
+    }
+    
+    /**
+     * Optimize meta field queries (for jet-engine/meta-fields/query hook)
+     */
+    public function optimize_meta_query($query, $field_settings, $listing_settings) {
+        $start_time = microtime(true);
+        
+        // Log the optimization attempt
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+            error_log('ALO: JetEngine meta query optimization triggered');
+        }
+        
+        // If it's a simple meta query, optimize it
+        if (is_array($query) && isset($query['meta_query'])) {
+            $original_meta_query = $query['meta_query'];
+            $optimized_meta_query = $this->simplify_meta_query($original_meta_query);
+            
+            if ($optimized_meta_query !== $original_meta_query) {
+                $query['meta_query'] = $optimized_meta_query;
+                $this->stats['meta_queries_reduced']++;
+            }
+        }
+        
+        // Track optimization time
+        $end_time = microtime(true);
+        $this->stats['query_time_saved'] += ($end_time - $start_time) * 1000;
+        
+        return $query;
     }
 } 

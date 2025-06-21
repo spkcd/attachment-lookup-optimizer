@@ -42,16 +42,35 @@ class JetEnginePreloader {
      * Constructor
      */
     public function __construct() {
-        $this->init_hooks();
+        // Delay initialization until plugins are loaded to ensure JetEngine is available
+        add_action('plugins_loaded', [$this, 'init_hooks'], 20);
     }
     
     /**
      * Initialize hooks
      */
-    private function init_hooks() {
+    public function init_hooks() {
         // Check if JetEngine is active
         if (!$this->is_jetengine_active()) {
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('ALO: JetEngine Preloader - JetEngine not detected, hooks not initialized');
+            }
             return;
+        }
+        
+        // Check if preloading is enabled
+        $this->preloading_enabled = apply_filters('alo_jetengine_preloading_enabled', true);
+        
+        if (!$this->preloading_enabled) {
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('ALO: JetEngine Preloader disabled by setting');
+            }
+            return;
+        }
+        
+        // Log successful initialization
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+            error_log('ALO: JetEngine Preloader - Successfully initialized hooks');
         }
         
         // Hook into JetEngine listing rendering
@@ -64,10 +83,7 @@ class JetEnginePreloader {
         // Hook into general JetEngine queries
         add_action('jet-engine/query-builder/query/after-query-setup', [$this, 'preload_query_attachments'], 10, 2);
         
-        // Enable/disable based on admin setting
-        $this->preloading_enabled = apply_filters('alo_jetengine_preloading_enabled', true);
-        
-        // Check admin setting
+        // Check admin setting updates
         add_action('admin_init', [$this, 'update_preloading_setting']);
         
         // Reset stats on new request
@@ -82,7 +98,42 @@ class JetEnginePreloader {
      * Check if JetEngine is active
      */
     private function is_jetengine_active() {
-        return class_exists('Jet_Engine') || function_exists('jet_engine');
+        // Check for JetEngine class (most reliable)
+        if (class_exists('Jet_Engine')) {
+            return true;
+        }
+        
+        // Check for JetEngine constant
+        if (defined('JET_ENGINE_VERSION')) {
+            return true;
+        }
+        
+        // Check for JetEngine functions
+        if (function_exists('jet_engine')) {
+            return true;
+        }
+        
+        // Check if JetEngine plugin file is active
+        if (function_exists('is_plugin_active') && is_plugin_active('jet-engine/jet-engine.php')) {
+            return true;
+        }
+        
+        // Check for JetEngine specific hooks/filters existence
+        if (has_action('jet-engine/listing/grid/before-render')) {
+            return true;
+        }
+        
+        // Check WordPress plugin list
+        if (function_exists('get_plugins')) {
+            $active_plugins = get_option('active_plugins', []);
+            foreach ($active_plugins as $plugin) {
+                if (strpos($plugin, 'jet-engine') !== false) {
+                    return true;
+                }
+            }
+        }
+        
+        return false;
     }
     
     /**
@@ -103,16 +154,33 @@ class JetEnginePreloader {
      * Preload attachments for listing grid rendering
      */
     public function preload_listing_attachments($listing_id, $settings = []) {
-        if (!$this->preloading_enabled || !$this->cache_manager) {
+        if (!$this->preloading_enabled) {
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log("ALO: JetEngine preloading disabled, skipping listing {$listing_id}");
+            }
+            return;
+        }
+        
+        if (!$this->cache_manager) {
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log("ALO: JetEngine preloader - cache manager not set, cannot preload listing {$listing_id}");
+            }
             return;
         }
         
         $start_time = microtime(true);
         
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+            error_log("ALO: JetEngine preloader starting for listing {$listing_id}");
+        }
+        
         // Get listing configuration
         $listing_config = $this->get_listing_config($listing_id);
         
         if (!$listing_config) {
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log("ALO: JetEngine preloader - no config found for listing {$listing_id}");
+            }
             return;
         }
         
@@ -120,6 +188,10 @@ class JetEnginePreloader {
         $urls = $this->extract_listing_urls($listing_config, $settings);
         
         if (!empty($urls)) {
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log("ALO: JetEngine preloader - found " . count($urls) . " URLs to preload for listing {$listing_id}");
+            }
+            
             // Preload URLs using batch lookup
             $this->preload_urls($urls);
             
@@ -134,6 +206,10 @@ class JetEnginePreloader {
                     $listing_id,
                     ($end_time - $start_time) * 1000
                 ));
+            }
+        } else {
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log("ALO: JetEngine preloader - no URLs found for listing {$listing_id}");
             }
         }
     }
@@ -157,7 +233,7 @@ class JetEnginePreloader {
     /**
      * Preload attachments for JetEngine queries
      */
-    public function preload_query_attachments($query, $query_args) {
+    public function preload_query_attachments($query, $query_args = null) {
         if (!$this->preloading_enabled || !$this->cache_manager) {
             return;
         }
@@ -404,7 +480,11 @@ class JetEnginePreloader {
         }
         
         // Check for common image extensions
-        $image_extensions = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'];
+        $image_extensions = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'avif', 'heic'];
+        
+        // Allow filtering for custom image types
+        $image_extensions = apply_filters('alo_supported_image_extensions', $image_extensions);
+        
         $extension = strtolower(pathinfo(parse_url($string, PHP_URL_PATH), PATHINFO_EXTENSION));
         
         return in_array($extension, $image_extensions);

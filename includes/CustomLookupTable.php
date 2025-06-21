@@ -20,7 +20,7 @@ class CustomLookupTable {
     /**
      * Table version for schema updates
      */
-    const TABLE_VERSION = '1.0';
+    const TABLE_VERSION = '2.0';
     
     /**
      * Option name for table version
@@ -40,7 +40,17 @@ class CustomLookupTable {
     /**
      * Whether the table exists and is ready
      */
-    private $table_ready = false;
+    private $table_ready = null;
+    
+    /**
+     * Static cache for table existence to avoid multiple DB queries per request
+     */
+    private static $table_exists_cache = null;
+    
+    /**
+     * Static flag to prevent multiple table creation attempts in same request
+     */
+    private static $table_creation_attempted = false;
     
     /**
      * Constructor
@@ -50,7 +60,20 @@ class CustomLookupTable {
         
         if ($this->enabled) {
             $this->init_hooks();
-            $this->ensure_table_exists();
+            
+            // Only attempt table operations once per minute to prevent spam
+            $last_attempt = get_transient('alo_table_creation_attempt');
+            if (!$last_attempt) {
+                set_transient('alo_table_creation_attempt', time(), 60); // 60 seconds
+                
+                // Ensure table exists
+                $this->ensure_table_exists();
+                
+                // Run migration if needed (for existing installations)
+                if ($this->table_exists()) {
+                    $this->migrate_to_hash_structure();
+                }
+            }
         }
     }
     
@@ -90,20 +113,36 @@ class CustomLookupTable {
             return false;
         }
         
-        if ($this->table_ready !== null) {
-            return $this->table_ready;
+        // Use static cache to avoid multiple DB queries in same request
+        if (self::$table_exists_cache !== null) {
+            return self::$table_exists_cache;
         }
         
         global $wpdb;
         $table_name = $this->get_table_name();
         
-        $table_exists = $wpdb->get_var($wpdb->prepare(
+        // Use multiple verification methods for reliability
+        $table_exists_info_schema = $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = %s AND table_name = %s",
             DB_NAME,
             $table_name
         )) > 0;
         
+        $table_exists_show_tables = $wpdb->get_var("SHOW TABLES LIKE '$table_name'") === $table_name;
+        
+        // Table exists if either method confirms it
+        $table_exists = $table_exists_info_schema || $table_exists_show_tables;
+        
+        // Additional verification: check if we can query the table structure
+        if ($table_exists) {
+            $table_structure = $wpdb->get_results("DESCRIBE $table_name");
+            $table_exists = !empty($table_structure);
+        }
+        
+        // Cache the result for this request
+        self::$table_exists_cache = $table_exists;
         $this->table_ready = $table_exists;
+        
         return $table_exists;
     }
     
@@ -111,10 +150,17 @@ class CustomLookupTable {
      * Ensure the table exists, create if needed
      */
     private function ensure_table_exists() {
+        // Use cached result if available
+        if ($this->table_ready === true) {
+            return true;
+        }
+        
+        // Check if table exists first
         if ($this->table_exists()) {
             return true;
         }
         
+        // Only create if it doesn't exist
         return $this->create_table();
     }
     
@@ -123,33 +169,111 @@ class CustomLookupTable {
      */
     public function create_table() {
         global $wpdb;
-        
+
+        // Enable the feature first if not already enabled
+        if (!$this->enabled) {
+            $this->enabled = true;
+            update_option('alo_custom_lookup_table', true);
+        }
+
         $table_name = $this->get_table_name();
         $charset_collate = $wpdb->get_charset_collate();
-        
+
+        // Log the table creation attempt
+        error_log('ALO: Attempting to create custom lookup table: ' . $table_name);
+
+        // First, let's try a direct approach without checking existing columns
+        // Drop table if it exists but is problematic
+        $wpdb->query("DROP TABLE IF EXISTS $table_name");
+        error_log('ALO: Dropped existing table (if any): ' . $table_name);
+
+        // Fixed SQL - use hash for unique constraint to avoid truncation issues
         $sql = "CREATE TABLE $table_name (
             id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
             post_id bigint(20) unsigned NOT NULL,
             meta_value text NOT NULL,
+            meta_value_hash char(32) NOT NULL,
             updated_at datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             PRIMARY KEY (id),
-            UNIQUE KEY unique_meta_value (meta_value(191)),
+            UNIQUE KEY unique_meta_value_hash (meta_value_hash),
             KEY post_id_idx (post_id),
-            KEY updated_at_idx (updated_at)
+            KEY updated_at_idx (updated_at),
+            KEY meta_value_prefix_idx (meta_value(191))
         ) $charset_collate;";
+
+        // Try direct creation first
+        $direct_result = $wpdb->query($sql);
+        error_log('ALO: Direct CREATE TABLE result: ' . ($direct_result !== false ? 'SUCCESS' : 'FAILED'));
         
+        if ($wpdb->last_error) {
+            error_log('ALO: Direct creation MySQL error: ' . $wpdb->last_error);
+        }
+
+        // Also try with dbDelta for WordPress compatibility
         require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
         $result = dbDelta($sql);
         
+        // Log the dbDelta result
+        if (is_array($result)) {
+            error_log('ALO: dbDelta result: ' . print_r($result, true));
+        }
+        
+        // Check for MySQL errors
+        if (!empty($wpdb->last_error)) {
+            error_log('ALO: MySQL error during table creation: ' . $wpdb->last_error);
+        }
+
+        // Reset table_ready cache to force fresh check
+        $this->table_ready = null;
+        self::$table_exists_cache = null; // Clear static cache
+        
+        // Verify table was created successfully with multiple methods
+        $table_exists_info_schema = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = %s AND table_name = %s",
+            DB_NAME,
+            $table_name
+        )) > 0;
+        
+        $table_exists_show_tables = $wpdb->get_var("SHOW TABLES LIKE '$table_name'") === $table_name;
+        
+        error_log('ALO: Table existence check - info_schema: ' . ($table_exists_info_schema ? 'YES' : 'NO') . ', show_tables: ' . ($table_exists_show_tables ? 'YES' : 'NO'));
+        
+        if (!$table_exists_info_schema && !$table_exists_show_tables) {
+            error_log('ALO: Failed to create custom lookup table: ' . $table_name);
+            error_log('ALO: Last MySQL error: ' . $wpdb->last_error);
+            error_log('ALO: SQL used: ' . $sql);
+            return false;
+        }
+
+        // Test basic operations
+        $test_value = 'test/creation/verification.jpg';
+        $test_insert = $wpdb->insert(
+            $table_name,
+            [
+                'post_id' => 999999,
+                'meta_value' => $test_value,
+                'meta_value_hash' => md5($test_value),
+                'updated_at' => current_time('mysql', true)
+            ],
+            ['%d', '%s', '%s', '%s']
+        );
+        
+        if ($test_insert !== false) {
+            $wpdb->delete($table_name, ['post_id' => 999999], ['%d']);
+            error_log('ALO: Table operations test: SUCCESS');
+        } else {
+            error_log('ALO: Table operations test: FAILED - ' . $wpdb->last_error);
+        }
+
         // Update table version
         update_option(self::VERSION_OPTION, self::TABLE_VERSION);
-        
+
         // Set table as ready
         $this->table_ready = true;
-        
-        // Log table creation
-        error_log('ALO: Custom lookup table created: ' . $table_name);
-        
+
+        // Log successful table creation
+        error_log('ALO: Custom lookup table created successfully: ' . $table_name);
+
         return true;
     }
     
@@ -167,8 +291,57 @@ class CustomLookupTable {
         
         // Mark table as not ready
         $this->table_ready = false;
+        self::$table_exists_cache = null; // Clear static cache
         
         error_log('ALO: Custom lookup table dropped: ' . $table_name);
+    }
+    
+    /**
+     * Migrate existing table to new hash-based structure
+     */
+    public function migrate_to_hash_structure() {
+        if (!$this->table_exists()) {
+            return false;
+        }
+        
+        global $wpdb;
+        $table_name = $this->get_table_name();
+        
+        // Check if meta_value_hash column already exists
+        $columns = $wpdb->get_results("DESCRIBE $table_name");
+        $has_hash_column = false;
+        
+        foreach ($columns as $column) {
+            if ($column->Field === 'meta_value_hash') {
+                $has_hash_column = true;
+                break;
+            }
+        }
+        
+        if (!$has_hash_column) {
+            // Add the hash column
+            $wpdb->query("ALTER TABLE $table_name ADD COLUMN meta_value_hash char(32) NOT NULL DEFAULT ''");
+            
+            // Remove the old truncated unique key if it exists
+            $wpdb->query("ALTER TABLE $table_name DROP INDEX unique_meta_value");
+            
+            // Add the hash index
+            $wpdb->query("ALTER TABLE $table_name ADD UNIQUE KEY unique_meta_value_hash (meta_value_hash)");
+            
+            // Add prefix index for meta_value searches
+            $wpdb->query("ALTER TABLE $table_name ADD KEY meta_value_prefix_idx (meta_value(191))");
+            
+            error_log('ALO: Added meta_value_hash column and updated indexes');
+        }
+        
+        // Populate hash values for existing records
+        $records_updated = $wpdb->query(
+            "UPDATE $table_name SET meta_value_hash = MD5(meta_value) WHERE meta_value_hash = ''"
+        );
+        
+        error_log("ALO: Updated $records_updated records with hash values");
+        
+        return true;
     }
     
     /**
@@ -182,10 +355,11 @@ class CustomLookupTable {
         global $wpdb;
         $table_name = $this->get_table_name();
         
-        // Try exact match first
+        // Try exact match first using hash for faster lookup
+        $meta_value_hash = md5($file_path);
         $post_id = $wpdb->get_var($wpdb->prepare(
-            "SELECT post_id FROM $table_name WHERE meta_value = %s LIMIT 1",
-            $file_path
+            "SELECT post_id FROM $table_name WHERE meta_value_hash = %s LIMIT 1",
+            $meta_value_hash
         ));
         
         if ($post_id) {
@@ -193,22 +367,111 @@ class CustomLookupTable {
         }
         
         // Try with leading slash
-        $post_id = $wpdb->get_var($wpdb->prepare(
-            "SELECT post_id FROM $table_name WHERE meta_value = %s LIMIT 1",
-            '/' . ltrim($file_path, '/')
-        ));
-        
-        if ($post_id) {
-            return (int) $post_id;
+        $with_slash = '/' . ltrim($file_path, '/');
+        if ($with_slash !== $file_path) {
+            $meta_value_hash = md5($with_slash);
+            $post_id = $wpdb->get_var($wpdb->prepare(
+                "SELECT post_id FROM $table_name WHERE meta_value_hash = %s LIMIT 1",
+                $meta_value_hash
+            ));
+            
+            if ($post_id) {
+                return (int) $post_id;
+            }
         }
         
         // Try without leading slash
-        $post_id = $wpdb->get_var($wpdb->prepare(
-            "SELECT post_id FROM $table_name WHERE meta_value = %s LIMIT 1",
-            ltrim($file_path, '/')
-        ));
+        $without_slash = ltrim($file_path, '/');
+        if ($without_slash !== $file_path) {
+            $meta_value_hash = md5($without_slash);
+            $post_id = $wpdb->get_var($wpdb->prepare(
+                "SELECT post_id FROM $table_name WHERE meta_value_hash = %s LIMIT 1",
+                $meta_value_hash
+            ));
+            
+            if ($post_id) {
+                return (int) $post_id;
+            }
+        }
         
-        return $post_id ? (int) $post_id : false;
+        return false;
+    }
+    
+    /**
+     * Get multiple attachment post IDs by file paths (batch operation)
+     * 
+     * @param array $file_paths Array of file paths to look up
+     * @return array Associative array mapping file paths to post IDs (false if not found)
+     */
+    public function batch_get_post_ids($file_paths) {
+        if (!$this->table_exists() || empty($file_paths)) {
+            return [];
+        }
+        
+        global $wpdb;
+        $table_name = $this->get_table_name();
+        $results = [];
+        
+        // Initialize results array with false values
+        foreach ($file_paths as $file_path) {
+            $results[$file_path] = false;
+        }
+        
+        // Prepare all variations of file paths for bulk lookup using hashes
+        $lookup_hashes = [];
+        $hash_mapping = [];
+        
+        foreach ($file_paths as $file_path) {
+            // Original path
+            $hash = md5($file_path);
+            $lookup_hashes[] = $hash;
+            $hash_mapping[$hash] = $file_path;
+            
+            // With leading slash
+            $with_slash = '/' . ltrim($file_path, '/');
+            if ($with_slash !== $file_path) {
+                $hash = md5($with_slash);
+                $lookup_hashes[] = $hash;
+                $hash_mapping[$hash] = $file_path;
+            }
+            
+            // Without leading slash
+            $without_slash = ltrim($file_path, '/');
+            if ($without_slash !== $file_path) {
+                $hash = md5($without_slash);
+                $lookup_hashes[] = $hash;
+                $hash_mapping[$hash] = $file_path;
+            }
+        }
+        
+        // Remove duplicates
+        $lookup_hashes = array_unique($lookup_hashes);
+        
+        if (empty($lookup_hashes)) {
+            return $results;
+        }
+        
+        // Create placeholders for IN query
+        $placeholders = array_fill(0, count($lookup_hashes), '%s');
+        $in_clause = implode(',', $placeholders);
+        
+        // Perform bulk lookup using hashes
+        $query = "SELECT meta_value, meta_value_hash, post_id FROM $table_name WHERE meta_value_hash IN ($in_clause)";
+        $lookup_results = $wpdb->get_results($wpdb->prepare($query, $lookup_hashes));
+        
+        // Map results back to original file paths
+        foreach ($lookup_results as $row) {
+            $found_hash = $row->meta_value_hash;
+            $post_id = (int) $row->post_id;
+            
+            // Find the original file path this result corresponds to
+            if (isset($hash_mapping[$found_hash])) {
+                $original_path = $hash_mapping[$found_hash];
+                $results[$original_path] = $post_id;
+            }
+        }
+        
+        return $results;
     }
     
     /**
@@ -260,22 +523,51 @@ class CustomLookupTable {
         global $wpdb;
         $table_name = $this->get_table_name();
         
-        // First, remove any existing records for this post_id
-        $wpdb->delete($table_name, ['post_id' => $post_id], ['%d']);
+        // Generate hash for the meta_value to avoid truncation issues
+        $meta_value_hash = md5($meta_value);
         
-        // Insert new record
-        $result = $wpdb->insert(
-            $table_name,
-            [
-                'post_id' => $post_id,
-                'meta_value' => $meta_value,
-                'updated_at' => current_time('mysql', true)
-            ],
-            ['%d', '%s', '%s']
-        );
+        // Check if this meta_value already exists using hash (regardless of post_id)
+        $existing_record = $wpdb->get_row($wpdb->prepare(
+            "SELECT id, post_id FROM $table_name WHERE meta_value_hash = %s LIMIT 1",
+            $meta_value_hash
+        ));
         
-        if ($result === false) {
-            error_log('ALO: Failed to upsert lookup for post_id: ' . $post_id . ', meta_value: ' . $meta_value);
+        if ($existing_record) {
+            // Update existing record with new post_id
+            $result = $wpdb->update(
+                $table_name,
+                [
+                    'post_id' => $post_id,
+                    'meta_value' => $meta_value,
+                    'updated_at' => current_time('mysql', true)
+                ],
+                ['id' => $existing_record->id],
+                ['%d', '%s', '%s'],
+                ['%d']
+            );
+            
+            if ($result === false) {
+                error_log('ALO: Failed to update lookup for post_id: ' . $post_id . ', meta_value: ' . $meta_value);
+            }
+        } else {
+            // Remove any existing records for this post_id (in case post changed file)
+            $wpdb->delete($table_name, ['post_id' => $post_id], ['%d']);
+            
+            // Insert new record with hash
+            $result = $wpdb->insert(
+                $table_name,
+                [
+                    'post_id' => $post_id,
+                    'meta_value' => $meta_value,
+                    'meta_value_hash' => $meta_value_hash,
+                    'updated_at' => current_time('mysql', true)
+                ],
+                ['%d', '%s', '%s', '%s']
+            );
+            
+            if ($result === false) {
+                error_log('ALO: Failed to insert lookup for post_id: ' . $post_id . ', meta_value: ' . $meta_value);
+            }
         }
     }
     
@@ -284,13 +576,13 @@ class CustomLookupTable {
      */
     public function delete_attachment_lookup($post_id) {
         if (!$this->table_exists()) {
-            return;
+            return false;
         }
         
         global $wpdb;
         $table_name = $this->get_table_name();
         
-        $wpdb->delete($table_name, ['post_id' => $post_id], ['%d']);
+        return $wpdb->delete($table_name, ['post_id' => $post_id], ['%d']);
     }
     
     /**
@@ -331,10 +623,49 @@ class CustomLookupTable {
     public function rebuild_table() {
         // Drop and recreate table
         $this->drop_table();
-        $this->create_table();
         
-        // Sync all existing attachments
-        return $this->bulk_sync_existing_attachments(10000);
+        if (!$this->create_table()) {
+            return 0;
+        }
+        
+        // Sync all existing attachments with duplicate handling
+        return $this->bulk_sync_existing_attachments_safe(10000);
+    }
+    
+    /**
+     * Safe bulk sync that handles duplicates
+     */
+    private function bulk_sync_existing_attachments_safe($limit = 1000) {
+        if (!$this->table_exists()) {
+            return 0;
+        }
+        
+        global $wpdb;
+        
+        // Get all attachments with _wp_attached_file meta
+        // Group by meta_value to handle duplicates
+        $attachments = $wpdb->get_results($wpdb->prepare(
+            "SELECT p.ID, pm.meta_value, MAX(p.post_date) as latest_date
+             FROM {$wpdb->posts} p
+             INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id
+             WHERE p.post_type = 'attachment'
+             AND p.post_status = 'inherit'
+             AND pm.meta_key = '_wp_attached_file'
+             AND pm.meta_value != ''
+             GROUP BY pm.meta_value
+             ORDER BY latest_date DESC
+             LIMIT %d",
+            $limit
+        ));
+        
+        $synced = 0;
+        foreach ($attachments as $attachment) {
+            // For each unique meta_value, use the most recent post
+            $this->upsert_lookup($attachment->ID, $attachment->meta_value);
+            $synced++;
+        }
+        
+        return $synced;
     }
     
     /**
@@ -486,5 +817,38 @@ class CustomLookupTable {
         );
         
         return $deleted;
+    }
+    
+    /**
+     * Alias for upsert_lookup for compatibility with UploadPreprocessor
+     * 
+     * @param string $file_path The file path to map
+     * @param int $post_id The post ID to map to
+     * @return bool Success status
+     */
+    public function upsert_mapping($file_path, $post_id) {
+        return $this->upsert_lookup($post_id, $file_path);
+    }
+    
+    /**
+     * Clean up duplicate file entries in the database
+     */
+    public function cleanup_duplicate_entries() {
+        if (!$this->table_exists()) {
+            return 0;
+        }
+        
+        global $wpdb;
+        $table_name = $this->get_table_name();
+        
+        // Find and remove duplicates using hash, keeping the most recent one
+        $duplicates_removed = $wpdb->query(
+            "DELETE t1 FROM $table_name t1
+             INNER JOIN $table_name t2 
+             WHERE t1.meta_value_hash = t2.meta_value_hash 
+             AND t1.id < t2.id"
+        );
+        
+        return $duplicates_removed;
     }
 } 

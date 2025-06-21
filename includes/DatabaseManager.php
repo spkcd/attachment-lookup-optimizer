@@ -58,6 +58,13 @@ class DatabaseManager {
      */
     public function __construct() {
         $this->init_query_monitoring();
+        
+        // Only clear stats cache on significant changes that affect counts
+        // Note: add_attachment is handled by UploadPreprocessor
+        add_action('delete_attachment', [$this, 'clear_stats_cache']);
+        
+        // Clear cache when plugin is updated (attachment counts may change due to processing)
+        add_action('upgrader_process_complete', [$this, 'maybe_clear_cache_on_plugin_update'], 10, 2);
     }
     
     /**
@@ -69,9 +76,13 @@ class DatabaseManager {
             get_option('alo_expensive_query_logging', false)
         );
         
-        // Set custom threshold if configured
+        // Set custom threshold - use milliseconds setting and convert to seconds
+        $threshold_ms = get_option('alo_slow_query_threshold_ms', 300);
+        $this->slow_query_threshold = $threshold_ms / 1000.0; // Convert ms to seconds
+        
+        // Apply filters
         $this->slow_query_threshold = apply_filters('alo_slow_query_threshold', 
-            get_option('alo_slow_query_threshold', 0.3)
+            $this->slow_query_threshold
         );
         
         if ($this->expensive_query_logging) {
@@ -632,24 +643,111 @@ class DatabaseManager {
     public function get_stats() {
         global $wpdb;
         
+        $index_exists = $this->index_exists(self::POSTMETA_INDEX_NAME);
+        $attached_file_index_exists = $this->index_exists(self::ATTACHED_FILE_INDEX_NAME);
+        
+        // Auto-set timestamps for existing indexes that don't have them
+        if ($index_exists && !get_option('alo_index_created', 0)) {
+            update_option('alo_index_created', current_time('timestamp'));
+        }
+        
+        if ($attached_file_index_exists && !get_option('alo_attached_file_index_created', 0)) {
+            update_option('alo_attached_file_index_created', current_time('timestamp'));
+        }
+        
+        // Use SharedStatsCache to prevent duplicate queries
+        $plugin = \AttachmentLookupOptimizer\Plugin::getInstance();
+        $shared_cache = $plugin->get_shared_stats_cache();
+        
+        // Check for existing cache first
+        $cache_key = 'alo_db_stats_cache_v3'; // Increment version for shared cache
+        $cached_stats = get_transient($cache_key);
+        
+        // Debug logging
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+            error_log('ALO DatabaseManager: get_stats() called, cache result: ' . ($cached_stats ? 'HIT' : 'MISS'));
+        }
+        
+        if ($cached_stats === false) {
+            $start_time = microtime(true);
+            
+            // Get shared stats (this consolidates the duplicate queries)
+            $shared_stats = $shared_cache->get_shared_stats();
+            
+            // Extract what we need from shared stats
+            $expensive_stats = [
+                'postmeta_count' => $shared_stats['postmeta_count'],
+                'attachment_meta_count' => $shared_stats['attachment_meta_count'],
+                'attachment_count' => $shared_stats['attachment_count'],
+                'estimated' => $shared_stats['estimated'] ?? false,
+                'sample_size' => $shared_stats['sample_size'] ?? null,
+                'avg_meta_per_attachment' => $shared_stats['avg_meta_per_attachment'] ?? null,
+                'cache_generated_at' => current_time('mysql'),
+                'query_time_ms' => round((microtime(true) - $start_time) * 1000, 2),
+                'using_shared_cache' => true
+            ];
+            
+            // Cache for 15 minutes (900 seconds) - longer duration
+            $cache_result = set_transient($cache_key, $expensive_stats, 900);
+            
+            // Debug logging
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log(sprintf(
+                    'ALO DatabaseManager: Generated stats using shared cache in %.2fms, cache set: %s', 
+                    $expensive_stats['query_time_ms'], 
+                    $cache_result ? 'SUCCESS' : 'FAILED'
+                ));
+            }
+        } else {
+            $expensive_stats = $cached_stats;
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('ALO DatabaseManager: Using cached stats from ' . ($expensive_stats['cache_generated_at'] ?? 'unknown'));
+            }
+        }
+        
         $stats = [
-            'index_exists' => $this->index_exists(self::POSTMETA_INDEX_NAME),
+            'index_exists' => $index_exists,
             'index_created' => get_option('alo_index_created', 0),
-            'attached_file_index_exists' => $this->index_exists(self::ATTACHED_FILE_INDEX_NAME),
+            'attached_file_index_exists' => $attached_file_index_exists,
             'attached_file_index_created' => get_option('alo_attached_file_index_created', 0),
-            'postmeta_count' => $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->postmeta}"),
-            'attachment_meta_count' => $wpdb->get_var($wpdb->prepare(
-                "SELECT COUNT(*) FROM {$wpdb->postmeta} pm 
-                 INNER JOIN {$wpdb->posts} p ON pm.post_id = p.ID 
-                 WHERE p.post_type = %s",
-                'attachment'
-            ))
         ];
         
-        // Merge in query monitoring statistics
+        // Merge cached expensive stats
+        $stats = array_merge($stats, $expensive_stats);
+        
+        // Merge in query monitoring statistics (these are lightweight)
         $query_stats = $this->get_query_stats();
         $stats = array_merge($stats, $query_stats);
         
         return $stats;
+    }
+    
+    /**
+     * Clear the database stats cache (useful when attachments are added/removed)
+     */
+    public function clear_stats_cache() {
+        delete_transient('alo_db_stats_cache');
+        delete_transient('alo_db_stats_cache_v2');
+        delete_transient('alo_db_stats_cache_v3');
+        
+        // Also clear shared cache
+        $plugin = \AttachmentLookupOptimizer\Plugin::getInstance();
+        $shared_cache = $plugin->get_shared_stats_cache();
+        if ($shared_cache) {
+            $shared_cache->clear_attachment_caches();
+        }
+        
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+            error_log('ALO DatabaseManager: Stats cache cleared');
+        }
+    }
+    
+    /**
+     * Clear the database stats cache when plugin is updated (attachment counts may change due to processing)
+     */
+    public function maybe_clear_cache_on_plugin_update($upgrader_object, $options) {
+        if (isset($options['action']) && $options['action'] === 'update' && isset($options['type']) && $options['type'] === 'plugin') {
+            $this->clear_stats_cache();
+        }
     }
 } 

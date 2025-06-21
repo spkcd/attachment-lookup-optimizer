@@ -1,17 +1,17 @@
 <?php
 /**
  * Plugin Name: Attachment Lookup Optimizer
- * Plugin URI: https://example.com/attachment-lookup-optimizer
+ * Plugin URI: https://sparkwebstudio.com/attachment-lookup-optimizer
  * Description: Optimizes attachment lookups by adding database indexes and caching attachment_url_to_postid() results.
- * Version: 1.0.0
- * Author: Your Name
- * Author URI: https://example.com
+ * Version: 1.1.0
+ * Author: SPARKWEB Studio
+ * Author URI: https://sparkwebstudio.com
  * License: GPL v2 or later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain: attachment-lookup-optimizer
  * Domain Path: /languages
  * Requires at least: 5.0
- * Tested up to: 6.4
+ * Tested up to: 6.7
  * Requires PHP: 7.4
  * Network: false
  */
@@ -20,7 +20,7 @@
 defined('ABSPATH') || exit;
 
 // Define plugin constants
-define('ALO_VERSION', '1.0.0');
+define('ALO_VERSION', '1.1.0');
 define('ALO_PLUGIN_FILE', __FILE__);
 define('ALO_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('ALO_PLUGIN_URL', plugin_dir_url(__FILE__));
@@ -61,6 +61,19 @@ register_activation_hook(__FILE__, function() {
 // Deactivation hook
 register_deactivation_hook(__FILE__, function() {
     \AttachmentLookupOptimizer\Plugin::deactivate();
+});
+
+// Add custom cron schedule for background processing
+add_filter('cron_schedules', function($schedules) {
+    $schedules['alo_5min'] = array(
+        'interval' => 300, // 5 minutes in seconds
+        'display' => __('Every 5 Minutes (ALO Background Processing)', 'attachment-lookup-optimizer')
+    );
+    $schedules['alo_1min'] = array(
+        'interval' => 60, // 1 minute in seconds
+        'display' => __('Every Minute (ALO BunnyCDN Sync)', 'attachment-lookup-optimizer')
+    );
+    return $schedules;
 });
 
 /**
@@ -1118,4 +1131,51 @@ function alo_seconds_until_next_cleanup() {
     $current_time = time();
     
     return max(0, $next_cleanup - $current_time);
+}
+
+/**
+ * Clear all stats caches for debugging
+ * 
+ * @return bool True if caches were cleared successfully
+ */
+function alo_clear_all_stats_caches() {
+    if (!current_user_can('manage_options')) {
+        return false;
+    }
+    
+    $plugin = \AttachmentLookupOptimizer\Plugin::getInstance();
+    
+    if (!$plugin) {
+        return false;
+    }
+    
+    // Clear shared cache first (this clears common duplicate queries)
+    $shared_cache = $plugin->get_shared_stats_cache();
+    if ($shared_cache) {
+        $shared_cache->clear_all_caches();
+    }
+    
+    // Clear cache manager caches
+    $cache_manager = $plugin->get_cache_manager();
+    if ($cache_manager) {
+        $cache_manager->clear_all_cache();
+    }
+    
+    // Clear database manager stats cache
+    $database_manager = $plugin->get_database_manager();
+    if ($database_manager) {
+        $database_manager->clear_stats_cache();
+    }
+    
+    // Clear upload preprocessor stats cache
+    $upload_preprocessor = $plugin->get_upload_preprocessor();
+    if ($upload_preprocessor) {
+        $upload_preprocessor->clear_stats_cache();
+    }
+    
+    if (defined('WP_DEBUG') && WP_DEBUG) {
+        error_log('ALO: All stats caches cleared manually (including shared cache)');
+    }
+    
+    return true;
 } 

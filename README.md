@@ -2,12 +2,224 @@
 
 A WordPress plugin that optimizes attachment URL lookups by adding database indexes and implementing intelligent caching for the `attachment_url_to_postid()` function.
 
-## Features
+**Developed by [SPARKWEB Studio](https://sparkwebstudio.com)** - Professional WordPress development and optimization services.
 
-### 🚀 Database Optimization
+## ✨ Key Features
+
+- **🚀 Ultra-Fast Lookups**: Custom database table for O(1) attachment URL resolution
+- **🎯 Smart Caching**: Multi-level caching with Redis/Memcached support
+- **🔄 JetEngine Integration**: Preloads attachment URLs for JetEngine listings and galleries
+- **🎨 Custom Field Support**: **NEW in v1.0.9** - Automatic URL rewriting in JetEngine and JetFormBuilder fields
+- **☁️ BunnyCDN Integration**: Automatic CDN uploads with background sync and migration tools
+- **📊 Real-time Monitoring**: Live statistics, performance tracking, and debug tools
+- **🛠 Background Processing**: Automatically processes existing attachments with progress tracking
+- **⚡ Global Override**: Replaces WordPress core `attachment_url_to_postid()` function
+- **🎨 Modern Image Formats**: Full WebP, AVIF, and HEIC support for next-gen web performance
+- **🔍 Advanced Debugging**: Comprehensive logging, slow query detection, and optimization insights
+
+## 🎨 WebP & Modern Image Format Support
+
+The plugin provides **comprehensive support for modern image formats**:
+
+### Supported Formats
+- **WebP**: 30-50% smaller than JPEG with same quality
+- **AVIF**: Next-generation format with 50% better compression  
+- **HEIC**: Apple's High Efficiency Image Container
+- **JPEG XL**: Emerging ultra-efficient format
+- All traditional formats (JPEG, PNG, GIF, SVG, BMP)
+
+### WebP Benefits
+- ✅ **Faster page loads** - Reduced file sizes improve Core Web Vitals
+- ✅ **Better SEO rankings** - Page speed improvements boost search rankings  
+- ✅ **Lower bandwidth costs** - Significant reduction in CDN and hosting costs
+- ✅ **Mobile optimization** - Critical for mobile-first indexing
+
+### Automatic Detection
+The plugin automatically recognizes WebP files through:
+- File extension detection (`.webp`, `.avif`, `.heic`)
+- WordPress attachment meta (`_wp_attached_file`)
+- Customizable format support via `alo_supported_image_extensions` filter
+
+**No configuration needed** - WebP images work immediately with all plugin features including caching, preloading, and lazy loading.
+
+📖 **[Complete WebP Documentation →](WEBP-SUPPORT.md)**
+
+## ☁️ BunnyCDN Integration
+
+The plugin provides **comprehensive BunnyCDN integration** for automatic media file uploads and CDN delivery:
+
+### Core Features
+- **🔄 Automatic Uploads**: New attachments automatically uploaded to BunnyCDN
+- **📦 Bulk Migration**: Migrate existing media library to CDN with progress tracking
+- **🔗 URL Management**: Seamlessly serve files from CDN with fallback support
+- **⏰ Background Sync**: Hourly automatic sync for failed uploads (configurable)
+- **🔄 Retry System**: Manual retry for failed uploads with one-click resolution
+- **🗑️ Cleanup Integration**: Automatic CDN file deletion when WordPress attachments are removed
+
+### Configuration Options
+- **🔑 API Integration**: Secure API key management with connection testing
+- **🌍 Global Regions**: Support for 6 BunnyCDN regions (Germany, New York, LA, Singapore, Sydney, UK)
+- **🏷️ Custom Hostnames**: Optional custom CDN hostname configuration
+- **⚙️ Upload Control**: Toggle automatic uploads and background sync independently
+- **🎯 URL Override**: Choose whether to serve attachments from CDN or original server
+
+### Background Sync System
+- **⏰ Automatic Processing**: Runs every hour to catch missed uploads
+- **📊 Smart Batching**: Processes up to 10 attachments per run to prevent server overload
+- **🎛️ User Control**: **NEW in v1.0.8** - Toggle to enable/disable automatic background sync
+- **📈 Progress Tracking**: Real-time statistics and status monitoring
+- **🔄 Retry Logic**: Intelligent retry system for temporary failures
+
+### Migration & Management Tools
+- **📊 Migration Dashboard**: Real-time progress with statistics and activity log
+- **🎯 Batch Processing**: AJAX-based migration with 10 files per batch
+- **📈 Status Tracking**: Comprehensive upload attempt tracking and error logging
+- **🔄 Media Library Integration**: CDN status column with clickable links and retry buttons
+- **🛠️ Admin Tools**: Connection testing, manual sync, and comprehensive settings
+
+### Admin Interface
+```
+Tools > Attachment Optimizer > BunnyCDN Integration
+├── Enable BunnyCDN Integration ☑
+├── API Key Configuration 🔑
+├── Storage Zone & Region Selection 🌍
+├── Custom CDN Hostname (optional) 🏷️
+├── Serve attachments from BunnyCDN ☑
+├── Enable automatic background sync ☑
+├── Rewrite post content URLs ☑
+├── Rewrite BunnyCDN URLs in JetEngine/JetFormBuilder fields ☑ (NEW in v1.0.9)
+├── Background Sync Status 📊
+│   ├── Active/Inactive indicator
+│   ├── Next run time & pending count
+│   └── Last run results & statistics
+└── Migration Tools 🛠️
+    └── Tools > Migrate to BunnyCDN
+```
+
+### Media Library Enhancements
+- **📊 CDN Status Column**: Visual indicators (✅/❌) for upload status
+- **🔗 Direct CDN Links**: Clickable links to CDN-hosted files
+- **🔄 Retry Buttons**: One-click retry for failed uploads
+- **💡 Hover Tooltips**: Detailed upload information and timestamps
+- **📈 Upload Tracking**: Attempt counts, status history, and error details
+
+### Developer Integration
+```php
+// Check if BunnyCDN is enabled
+$bunny_manager = $plugin->get_bunny_cdn_manager();
+if ($bunny_manager->is_enabled()) {
+    // Upload file to BunnyCDN
+    $result = $bunny_manager->upload_file($local_path, $filename, $attachment_id);
+}
+
+// Get CDN URL for attachment
+$cdn_url = get_post_meta($attachment_id, '_bunnycdn_url', true);
+
+// Check upload status
+$upload_status = get_post_meta($attachment_id, '_bunnycdn_last_upload_status', true);
+```
+
+### Performance Benefits
+- **🚀 Global Delivery**: Files served from nearest edge location
+- **📉 Server Load Reduction**: Offload media delivery from origin server
+- **💰 Bandwidth Savings**: Reduce hosting bandwidth costs
+- **⚡ Faster Load Times**: Improved Core Web Vitals and user experience
+- **🔄 Automatic Optimization**: Smart retry and background processing
+
+## 🎨 JetEngine & JetFormBuilder Integration
+
+**NEW in v1.0.9** - The plugin now provides comprehensive support for custom field URL rewriting in JetEngine and JetFormBuilder:
+
+### Core Features
+- **🔄 Automatic URL Rewriting**: Replaces local URLs with BunnyCDN URLs in custom fields
+- **🎯 Smart Field Detection**: Automatically identifies image, file, gallery, and text fields
+- **🔧 Multiple Field Types**: Support for single files, galleries, repeater fields, and nested structures
+- **🛡️ Safe Processing**: Disabled by default to prevent unexpected changes
+- **📊 Comprehensive Logging**: Detailed logging of all custom field processing activities
+
+### Supported Field Patterns
+- **JetEngine Fields**: Standard meta field names and custom field configurations
+- **JetFormBuilder Fields**: `field_123456`, `jetform_`, `jfb_`, and custom patterns
+- **File Upload Fields**: Image uploads, file attachments, and gallery fields
+- **Complex Structures**: Repeater fields, nested arrays, and grouped field data
+
+### Field Type Detection
+The plugin intelligently detects field types:
+
+```php
+// Image fields - URLs and attachment IDs
+'image_gallery' => [1234, 5678, 9012]
+'featured_image' => 'https://site.com/wp-content/uploads/image.jpg'
+
+// File fields - Mixed formats
+'document_upload' => 'https://site.com/wp-content/uploads/doc.pdf'
+'attachment_id' => 1234
+
+// Gallery fields - Arrays of images
+'photo_gallery' => [
+    'https://site.com/wp-content/uploads/photo1.jpg',
+    'https://site.com/wp-content/uploads/photo2.jpg'
+]
+
+// Repeater fields - Nested structures
+'property_images' => [
+    ['image' => 1234, 'caption' => 'Living room'],
+    ['image' => 5678, 'caption' => 'Kitchen']
+]
+```
+
+### Admin Control
+- **Settings Location**: Tools > Attachment Optimizer > BunnyCDN Integration
+- **Control Checkbox**: "Rewrite BunnyCDN URLs in JetEngine/JetFormBuilder fields"
+- **Default State**: **Disabled** to prevent unexpected changes
+- **Safe Testing**: Enable for specific posts before site-wide activation
+
+### Processing Workflow
+1. **Upload Detection**: Monitors new BunnyCDN uploads
+2. **Field Scanning**: Searches posts for custom fields containing the uploaded URLs
+3. **Smart Replacement**: Replaces local URLs with CDN URLs based on field type
+4. **Bulk Processing**: Integrates with bulk URL replacement workflows
+5. **Error Handling**: Comprehensive error logging and graceful failure recovery
+
+### Developer Integration
+```php
+// Check if custom field rewriting is enabled
+$meta_rewriting = get_option('alo_bunnycdn_rewrite_meta_enabled', false);
+
+// Process custom fields for a specific post
+$plugin = \AttachmentLookupOptimizer\Plugin::getInstance();
+$content_rewriter = $plugin->get_bunnycdn_content_rewriter();
+$replacements = $content_rewriter->process_jetengine_custom_fields($post_id, $attachment_info, $cdn_url);
+
+// Check if field is JetEngine/JetFormBuilder field
+$is_jetengine = $content_rewriter->is_jetengine_field($field_name, $jetengine_fields);
+$is_jetformbuilder = $content_rewriter->is_jetformbuilder_field($field_name);
+```
+
+### Supported Use Cases
+- **Property Listings**: Gallery images in real estate sites
+- **Product Catalogs**: Product images and file downloads
+- **Portfolio Sites**: Project galleries and media files
+- **Event Listings**: Event photos and document attachments
+- **Directory Sites**: Business logos and image galleries
+- **Form Submissions**: User-uploaded files and images
+
+### Safety Features
+- **Permission Checks**: Proper capability validation for all operations
+- **Input Sanitization**: Comprehensive validation of field values and patterns
+- **Early Returns**: Processing stops immediately when disabled
+- **Backup Compatibility**: Original field values preserved during processing
+- **Error Recovery**: Graceful handling of malformed or corrupted field data
+
+### Performance Benefits
+- **Batch Processing**: Efficient handling of multiple fields per post
+- **Smart Caching**: Leverages existing cache infrastructure
+- **Minimal Overhead**: Zero performance impact when disabled
+- **Optimized Queries**: Efficient database operations for field detection
+
+## 🚀 Database Optimization
+
 - **Composite Index Creation**: Automatically adds a composite index on `postmeta` table for `(meta_key, meta_value)` columns
-- **One-time Setup**: Index creation runs only once per plugin version during activation or admin initialization
-- **Safe Implementation**: Checks for existing indexes before creation to prevent duplicates
 
 ### 💾 Intelligent Caching
 - **Function Interception**: Caches results of `attachment_url_to_postid()` calls
@@ -30,6 +242,7 @@ A WordPress plugin that optimizes attachment URL lookups by adding database inde
    - Start caching attachment URL lookups
    - Hook into WordPress core functions
 4. **Configure settings** at **Tools > Attachment Optimizer** in your WordPress admin
+5. **NEW in v1.0.9**: Enable JetEngine/JetFormBuilder custom field rewriting in BunnyCDN settings (disabled by default)
 
 ## Admin Interface
 
@@ -1603,3 +1816,110 @@ add_filter('alo_jetengine_query_optimization_enabled', function($enabled) {
 - **Complex Listings**: Prevented 200+ unnecessary nested queries per page
 
 The combination of lazy loading and query optimization provides comprehensive performance improvements for image-heavy, database-intensive JetEngine sites, ensuring optimal user experience and server performance!
+
+## 📋 Changelog
+
+### Version 1.1.0 (Latest)
+**🛠️ Critical Fixes & Stability Improvements**
+- **FIXED**: Resolved fatal error "Call to undefined function get_current_screen()" during WordPress initialization
+- **IMPROVED**: Enhanced MediaLibraryEnhancer safety with comprehensive initialization checks
+- **RESOLVED**: Fixed 13 duplicate HTML ID warnings in admin interface (alo_nonce fields)
+- **ENHANCED**: All admin forms now use unique nonce field IDs for HTML compliance
+- **STABILITY**: Improved plugin startup compatibility with other plugins
+- **AUTHOR**: Plugin now maintained by SPARKWEB Studio (https://sparkwebstudio.com)
+
+### Version 1.0.8
+**🎛️ BunnyCDN Auto Sync Control**
+- **NEW**: Added toggle to enable/disable automatic background sync for BunnyCDN uploads
+- **FEATURE**: "Enable automatic background sync for missing uploads" setting in BunnyCDN configuration
+- **ENHANCEMENT**: Background sync status now shows when auto sync is disabled with helpful guidance
+- **IMPROVEMENT**: Cron scheduling automatically manages based on toggle state
+- **DEFAULT**: Auto sync enabled by default for new installations
+- **ADMIN**: Enhanced admin interface with clear status indicators and user control
+
+### Version 1.0.7
+**🔄 BunnyCDN Integration & Media Management**
+- **NEW**: Complete BunnyCDN integration with automatic uploads and CDN delivery
+- **FEATURE**: Background sync system with hourly processing of failed uploads
+- **FEATURE**: Bulk migration tool with real-time progress tracking
+- **FEATURE**: Media library CDN status column with retry functionality
+- **FEATURE**: Comprehensive upload tracking and error logging
+- **FEATURE**: Automatic CDN file deletion when WordPress attachments are removed
+- **ADMIN**: BunnyCDN settings panel with API key, region selection, and custom hostname support
+- **SECURITY**: Enhanced permission checks and nonce protection throughout
+
+### Version 1.0.6
+**⚡ JetEngine Query Optimization & Performance**
+- **NEW**: JetEngine query optimization for reduced database load
+- **FEATURE**: Smart field selection based on template analysis
+- **FEATURE**: Meta query simplification and optimization
+- **FEATURE**: Nested query prevention for simple listings
+- **PERFORMANCE**: 60-80% improvement in query performance for JetEngine listings
+- **MONITORING**: Real-time query optimization statistics and logging
+
+### Version 1.0.5
+**🎨 Lazy Loading & Image Optimization**
+- **NEW**: Advanced lazy loading system for images
+- **FEATURE**: Above-the-fold image detection and exclusion
+- **FEATURE**: Intersection Observer API for smooth loading
+- **FEATURE**: WebP, AVIF, and HEIC format support
+- **PERFORMANCE**: Significant reduction in initial page load times
+- **ADMIN**: Lazy loading configuration and statistics
+
+### Version 1.0.4
+**🔍 Advanced Debugging & Monitoring**
+- **NEW**: Comprehensive debug logging system
+- **FEATURE**: Slow query detection and optimization insights
+- **FEATURE**: Real-time performance monitoring
+- **FEATURE**: Automated log cleanup and archiving
+- **ADMIN**: Debug dashboard with live statistics and controls
+
+### Version 1.0.3
+**🛠 Background Processing & Optimization**
+- **NEW**: Background processing system for existing attachments
+- **FEATURE**: Progress tracking and batch processing
+- **FEATURE**: Custom lookup table for O(1) attachment resolution
+- **PERFORMANCE**: Significant improvement in large media library handling
+- **ADMIN**: Background processing controls and monitoring
+
+### Version 1.0.2
+**🔄 JetEngine Integration & Preloading**
+- **NEW**: JetEngine compatibility and integration
+- **FEATURE**: Automatic URL preloading for JetEngine listings
+- **FEATURE**: Gallery and listing optimization
+- **PERFORMANCE**: Reduced database queries for JetEngine-powered sites
+- **ADMIN**: JetEngine-specific settings and statistics
+
+### Version 1.0.1
+**💾 Enhanced Caching & Reliability**
+- **IMPROVEMENT**: Multi-level caching with Redis/Memcached support
+- **FEATURE**: Intelligent cache selection (object cache vs transients)
+- **FEATURE**: Cache warming and bulk operations
+- **RELIABILITY**: Enhanced error handling and fallback mechanisms
+- **ADMIN**: Improved cache management interface
+
+### Version 1.0.0
+**🚀 Initial Release**
+- **CORE**: Database index optimization for attachment lookups
+- **CORE**: Intelligent caching system for `attachment_url_to_postid()`
+- **CORE**: Global override functionality
+- **ADMIN**: Comprehensive admin interface and settings
+- **FOUNDATION**: Enterprise-ready architecture with proper namespacing
+
+---
+
+## 🎯 Support & Development
+
+**Developed by SPARKWEB Studio** - Professional WordPress development and optimization services.
+
+- **🌐 Website**: [https://sparkwebstudio.com](https://sparkwebstudio.com)
+- **📧 Contact**: Professional WordPress development and custom solutions
+- **💼 Services**: Plugin development, website optimization, performance consulting
+
+### Professional Services
+- **Custom Plugin Development**: Tailored WordPress solutions for your business
+- **Website Performance Optimization**: Speed up your WordPress site
+- **BunnyCDN Integration**: Expert CDN setup and optimization
+- **JetEngine Customization**: Advanced JetEngine solutions and optimization
+
+**Need help with your WordPress site?** Visit [SPARKWEB Studio](https://sparkwebstudio.com) for professional WordPress development services.

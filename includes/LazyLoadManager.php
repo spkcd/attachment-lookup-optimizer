@@ -48,6 +48,9 @@ class LazyLoadManager {
      */
     public function __construct() {
         $this->init_hooks();
+        
+        // Delay JetEngine-specific hooks until plugins are loaded
+        add_action('plugins_loaded', [$this, 'init_jetengine_hooks'], 20);
     }
     
     /**
@@ -61,16 +64,9 @@ class LazyLoadManager {
             return;
         }
         
-        // Hook into image output functions
+        // Hook into general WordPress image output functions (these work early)
         add_filter('wp_get_attachment_image_attributes', [$this, 'add_lazy_loading_to_attachment'], 10, 3);
         add_filter('the_content', [$this, 'add_lazy_loading_to_content'], 15);
-        
-        // JetEngine specific hooks
-        add_filter('jet-engine/listings/dynamic-image/custom-image', [$this, 'add_lazy_loading_to_jetengine_image'], 10, 3);
-        add_action('jet-engine/listing/before-item', [$this, 'reset_image_counter'], 5);
-        add_action('jet-engine/listing/after-item', [$this, 'increment_image_counter'], 15);
-        
-        // Gallery hooks
         add_filter('wp_get_attachment_image', [$this, 'process_gallery_image'], 10, 5);
         
         // Reset counter on new page/request
@@ -81,6 +77,35 @@ class LazyLoadManager {
         
         // Intersection Observer script for advanced lazy loading
         add_action('wp_footer', [$this, 'add_intersection_observer_script']);
+    }
+    
+    /**
+     * Initialize JetEngine-specific hooks (delayed until JetEngine is available)
+     */
+    public function init_jetengine_hooks() {
+        // Only initialize JetEngine hooks if JetEngine is available
+        if (!$this->is_jetengine_active()) {
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('ALO: Lazy Load Manager - JetEngine not detected, JetEngine hooks skipped');
+            }
+            return;
+        }
+        
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+            error_log('ALO: Lazy Load Manager - JetEngine detected, initializing JetEngine hooks');
+        }
+        
+        // JetEngine specific hooks
+        add_filter('jet-engine/listings/dynamic-image/custom-image', [$this, 'add_lazy_loading_to_jetengine_image'], 10, 3);
+        add_action('jet-engine/listing/before-item', [$this, 'reset_image_counter'], 5);
+        add_action('jet-engine/listing/after-item', [$this, 'increment_image_counter'], 15);
+    }
+    
+    /**
+     * Check if JetEngine is active
+     */
+    private function is_jetengine_active() {
+        return class_exists('Jet_Engine') || function_exists('jet_engine') || defined('JET_ENGINE_VERSION');
     }
     
     /**
