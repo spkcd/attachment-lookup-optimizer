@@ -5,6 +5,56 @@ All notable changes to the Attachment Lookup Optimizer plugin will be documented
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2025-01-28
+
+### Major Architecture Improvement
+- **Asynchronous Upload System**: Completely redesigned BunnyCDN upload workflow to be asynchronous, eliminating form submission timeouts
+- **Background Processing Queue**: Implemented persistent queue system for BunnyCDN uploads with retry logic and exponential backoff
+- **Instant Form Responses**: Forms now complete immediately while uploads happen in background, dramatically improving user experience
+- **Intelligent Queue Management**: Automatic queue cleanup, duplicate detection, and batch processing with configurable limits
+- **Enhanced Reliability**: Multi-attempt retry system with smart failure handling and comprehensive error logging
+
+### Technical Implementation
+- Created async upload scheduling system with database persistence
+- Added background cron processing for queued uploads (every 30 seconds)
+- Implemented queue cleanup system (hourly) to prevent database bloat
+- Added comprehensive queue monitoring and status tracking
+- Enhanced error handling with exponential backoff retry logic
+
+## [1.1.2] - 2025-01-28
+
+### Performance Improvements
+- **Enhanced Upload Timeout Handling**: Implemented adaptive timeout based on file size (30s base + 1s per 100KB, capped at 120s) to prevent timeouts with large files
+- **Upload Concurrency Control**: Added throttling mechanism limiting to 3 concurrent BunnyCDN uploads to prevent server overload and resource contention
+- **Performance Monitoring**: Added comprehensive upload performance logging with throughput metrics, memory usage tracking, and detailed error categorization
+- **Duplicate Processing Fix**: Eliminated duplicate delayed offload scheduling between BunnyCDNManager and UploadPreprocessor to improve efficiency
+
+### Technical Enhancements
+- Enhanced error handling with specific timeout detection, SSL/certificate issue identification, and rate limiting detection
+- Added memory usage monitoring and warnings for large file uploads (>50MB)
+- Improved upload optimization with disabled redirects and compression for faster transfers
+- Added automatic upload counter management with proper cleanup on all exit paths
+
+## [1.1.1] - 2025-01-21
+
+### Fixed
+- **BunnyCDN Offload PHP Warnings**: Resolved critical PHP warnings (`exif_imagetype()` and `file_get_contents()` "Failed to open stream: No such file or directory") that occurred during BunnyCDN file offloading
+- **Delayed File Deletion**: Implemented delayed local file deletion system to prevent WordPress core from accessing deleted files during image processing
+- **EXIF Processing Compatibility**: Fixed timing conflict between BunnyCDN offload and WordPress core EXIF data extraction
+- **Image Processing Pipeline**: Enhanced compatibility with WordPress image processing workflows
+
+### Enhanced
+- **Offload Timing**: Local files now deleted after WordPress completes all image processing operations
+- **Error Prevention**: Eliminated WordPress core errors in `functions.php` lines 3338 and 3358
+- **Processing Safety**: Added `_alo_pending_offload` metadata to safely track files pending deletion
+- **Hook Integration**: Leveraged `wp_generate_attachment_metadata` hook (priority 99) for proper timing
+
+### Technical Improvements
+- **Component Coverage**: Applied fix across all BunnyCDN components (UploadPreprocessor, BunnyCDNManager, SyncController, CronSync, Migrator, MediaLibraryEnhancer)
+- **Safe Deletion Pipeline**: Replaced immediate `delete_local_files_after_upload()` with `schedule_delayed_file_deletion()`
+- **WordPress Core Compatibility**: Ensures WordPress can complete EXIF extraction and thumbnail generation before file removal
+- **Error Log Cleanup**: Eliminates recurring PHP warnings from server error logs
+
 ## [1.1.0] - 2025-01-20
 
 ### Fixed
@@ -191,6 +241,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Version History Summary
 
+- **v1.1.3**: Asynchronous upload system, form timeout elimination, background processing queue
+- **v1.1.2**: Performance improvements, upload timeout optimization, concurrency control
+- **v1.1.1**: BunnyCDN offload PHP warnings fix, delayed file deletion system
 - **v1.1.0**: Critical error fixes, admin interface improvements, SPARKWEB Studio ownership
 - **v1.0.9**: JetEngine/JetFormBuilder custom field integration
 - **v1.0.8**: BunnyCDN background sync controls and enhanced admin interface
@@ -204,6 +257,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **v1.0.0**: Initial release with core optimization features
 
 ## Upgrade Notes
+
+### From v1.1.2 to v1.1.3
+- **Revolutionary Improvement**: This update completely eliminates form submission timeouts
+- **Automatic Activation**: Asynchronous uploads activate automatically with no configuration needed
+- **Background Processing**: BunnyCDN uploads now happen in background via WordPress cron
+- **Immediate Benefits**: Forms submit instantly while uploads process behind the scenes
+- **Enhanced Monitoring**: Check error logs for async upload status and queue processing
+- **Zero Downtime**: Fully backward compatible with existing configurations
+
+### From v1.1.1 to v1.1.2
+- **Performance Enhancements**: This update improves BunnyCDN upload reliability and performance
+- **No Action Required**: All improvements are automatic with backward compatibility
+- **Reduced Timeouts**: Adaptive timeout handling should reduce upload failures
+- **Better Monitoring**: Enhanced logging provides better insight into upload performance
+
+### From v1.1.0 to v1.1.1
+- **PHP Warning Fixes**: This update resolves PHP warnings during BunnyCDN file offloading
+- **No Action Required**: All fixes are automatic and fully backward compatible
+- **Error Log Cleanup**: Eliminates recurring warnings in WordPress error logs
+- **Improved Compatibility**: Enhanced compatibility with WordPress core image processing
 
 ### From v1.0.9 to v1.1.0
 - **Critical Fixes**: This update resolves fatal errors during WordPress initialization

@@ -383,9 +383,10 @@ class BunnyCDNMigrator {
             // Rewrite post content URLs if enabled
             $this->rewrite_post_content_urls($attachment_id, $cdn_url);
             
-            // Delete local files if offload is enabled
+            // Schedule delayed local file deletion if offload is enabled
+            // This prevents WordPress core from encountering missing files during processing
             if (get_option('alo_bunnycdn_offload_enabled', false)) {
-                $this->delete_local_files_after_upload($attachment_id);
+                $this->schedule_delayed_file_deletion($attachment_id);
             }
             
             return true;
@@ -421,6 +422,22 @@ class BunnyCDNMigrator {
         } catch (Exception $e) {
             error_log("ALO: BunnyCDN migrator - content rewriter error for attachment {$attachment_id}: " . $e->getMessage());
         }
+    }
+    
+    /**
+     * Schedule delayed file deletion after WordPress processing is complete
+     * 
+     * @param int $attachment_id Attachment post ID
+     */
+    private function schedule_delayed_file_deletion($attachment_id) {
+        if (!$attachment_id || get_post_type($attachment_id) !== 'attachment') {
+            return;
+        }
+        
+        // Mark this attachment for delayed deletion
+        update_post_meta($attachment_id, '_alo_pending_offload', true);
+        
+        error_log("ALO: BunnyCDN migrator - scheduled delayed offload for attachment {$attachment_id}");
     }
     
     /**

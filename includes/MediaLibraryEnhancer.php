@@ -54,6 +54,9 @@ class MediaLibraryEnhancer {
         
         // Register AJAX handler for retry uploads
         add_action('wp_ajax_bunnycdn_retry_upload', [$this, 'ajax_retry_upload']);
+        
+        // Hook into attachment metadata generation completion for delayed file deletion
+        add_filter('wp_generate_attachment_metadata', [$this, 'handle_metadata_generation_complete'], 99, 2);
     }
     
     /**
@@ -998,9 +1001,10 @@ class MediaLibraryEnhancer {
                 // Rewrite post content URLs if enabled
                 $this->rewrite_post_content_urls($attachment_id, $cdn_url);
                 
-                // Delete local files if offload is enabled
+                // Schedule delayed local file deletion if offload is enabled
+                // This prevents WordPress core from encountering missing files during processing
                 if (get_option('alo_bunnycdn_offload_enabled', false)) {
-                    $this->delete_local_files_after_upload($attachment_id);
+                    $this->schedule_delayed_file_deletion($attachment_id);
                 }
                 
                 // Log successful retry
@@ -1054,6 +1058,45 @@ class MediaLibraryEnhancer {
         } catch (Exception $e) {
             error_log("ALO: Media library enhancer - content rewriter error for attachment {$attachment_id}: " . $e->getMessage());
         }
+    }
+    
+    /**
+     * Schedule delayed file deletion after WordPress processing is complete
+     * 
+     * @param int $attachment_id Attachment post ID
+     */
+    private function schedule_delayed_file_deletion($attachment_id) {
+        if (!$attachment_id || get_post_type($attachment_id) !== 'attachment') {
+            return;
+        }
+        
+        // Mark this attachment for delayed deletion
+        update_post_meta($attachment_id, '_alo_pending_offload', true);
+        
+        error_log("ALO: Media library enhancer - scheduled delayed offload for attachment {$attachment_id}");
+    }
+    
+    /**
+     * Handle completion of WordPress attachment metadata generation
+     * This runs after WordPress has finished processing the uploaded file
+     * 
+     * @param array $metadata Attachment metadata
+     * @param int $attachment_id Attachment post ID
+     * @return array Unchanged metadata
+     */
+    public function handle_metadata_generation_complete($metadata, $attachment_id) {
+        // Check if this attachment is marked for delayed deletion
+        $pending_offload = get_post_meta($attachment_id, '_alo_pending_offload', true);
+        
+        if ($pending_offload) {
+            // Remove the pending flag
+            delete_post_meta($attachment_id, '_alo_pending_offload');
+            
+            // Now it's safe to delete local files
+            $this->delete_local_files_after_upload($attachment_id);
+        }
+        
+        return $metadata;
     }
     
     /**

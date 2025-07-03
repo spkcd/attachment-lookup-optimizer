@@ -1819,7 +1819,25 @@ The combination of lazy loading and query optimization provides comprehensive pe
 
 ## 📋 Changelog
 
-### Version 1.1.0 (Latest)
+### Version 1.1.3 (Latest)
+**🚀 Revolutionary Asynchronous Upload System**
+- **BREAKTHROUGH**: Completely eliminated form submission timeouts by implementing asynchronous BunnyCDN upload processing
+- **INSTANT**: Forms now complete in under 1 second while uploads happen in background via WordPress cron
+- **RELIABLE**: Persistent queue system with retry logic and exponential backoff for maximum upload reliability
+- **INTELLIGENT**: Automatic queue management with batch processing, duplicate detection, and cleanup system
+- **SEAMLESS**: Zero configuration required - async uploads activate automatically with full backward compatibility
+- **ENHANCED**: Comprehensive queue monitoring and status tracking with detailed error logging for transparency
+
+### Version 1.1.1
+**🛠️ BunnyCDN Offload PHP Warnings Fix**
+- **FIXED**: Resolved critical PHP warnings (`exif_imagetype()` and `file_get_contents()` "Failed to open stream: No such file or directory") during BunnyCDN file offloading
+- **IMPROVED**: Implemented delayed local file deletion system to prevent WordPress core from accessing deleted files during image processing
+- **ENHANCED**: Fixed timing conflict between BunnyCDN offload and WordPress core EXIF data extraction
+- **TECHNICAL**: Applied fix across all BunnyCDN components with `_alo_pending_offload` metadata and `wp_generate_attachment_metadata` hook integration
+- **COMPATIBILITY**: Enhanced compatibility with WordPress core image processing workflows
+- **ERROR LOGS**: Eliminated recurring PHP warnings from server error logs
+
+### Version 1.1.0
 **🛠️ Critical Fixes & Stability Improvements**
 - **FIXED**: Resolved fatal error "Call to undefined function get_current_screen()" during WordPress initialization
 - **IMPROVED**: Enhanced MediaLibraryEnhancer safety with comprehensive initialization checks

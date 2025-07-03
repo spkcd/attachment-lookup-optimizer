@@ -3,7 +3,7 @@
  * Plugin Name: Attachment Lookup Optimizer
  * Plugin URI: https://sparkwebstudio.com/attachment-lookup-optimizer
  * Description: Optimizes attachment lookups by adding database indexes and caching attachment_url_to_postid() results.
- * Version: 1.1.0
+ * Version: 1.1.3
  * Author: SPARKWEB Studio
  * Author URI: https://sparkwebstudio.com
  * License: GPL v2 or later
@@ -20,7 +20,7 @@
 defined('ABSPATH') || exit;
 
 // Define plugin constants
-define('ALO_VERSION', '1.1.0');
+define('ALO_VERSION', '1.1.3');
 define('ALO_PLUGIN_FILE', __FILE__);
 define('ALO_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('ALO_PLUGIN_URL', plugin_dir_url(__FILE__));
@@ -73,7 +73,18 @@ add_filter('cron_schedules', function($schedules) {
         'interval' => 60, // 1 minute in seconds
         'display' => __('Every Minute (ALO BunnyCDN Sync)', 'attachment-lookup-optimizer')
     );
+    $schedules['alo_hourly'] = array(
+        'interval' => 3600, // 1 hour in seconds
+        'display' => __('Every Hour (ALO Async Queue Cleanup)', 'attachment-lookup-optimizer')
+    );
     return $schedules;
+});
+
+// Schedule async upload queue cleanup
+add_action('wp', function() {
+    if (!wp_next_scheduled('alo_cleanup_async_queue')) {
+        wp_schedule_event(time(), 'alo_hourly', 'alo_cleanup_async_queue');
+    }
 });
 
 /**

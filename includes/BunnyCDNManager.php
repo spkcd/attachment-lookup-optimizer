@@ -75,6 +75,9 @@ class BunnyCDNManager {
         // Hook into attachment deletion to clean up CDN files
         add_action('delete_attachment', [$this, 'handle_attachment_deletion'], 10, 1);
         
+        // Hook into attachment metadata generation completion for delayed file deletion
+        add_filter('wp_generate_attachment_metadata', [$this, 'handle_metadata_generation_complete'], 99, 2);
+        
         if ($this->is_enabled()) {
             // Log initialization
             error_log('ALO: BunnyCDN Manager initialized with storage zone: ' . $this->storage_zone);
@@ -180,6 +183,42 @@ class BunnyCDNManager {
     }
     
     /**
+     * Check if we should throttle uploads to prevent server overload
+     * 
+     * @return bool True if upload should be throttled
+     */
+    private function should_throttle_upload() {
+        // Get current active upload count from transient
+        $active_uploads = get_transient('alo_bunnycdn_active_uploads') ?: 0;
+        $max_concurrent = 3; // Allow maximum 3 concurrent uploads
+        
+        if ($active_uploads >= $max_concurrent) {
+            error_log("ALO: BunnyCDN throttling upload - {$active_uploads} active uploads (max: {$max_concurrent})");
+            return true;
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Increment active upload counter
+     */
+    private function increment_active_uploads() {
+        $active_uploads = get_transient('alo_bunnycdn_active_uploads') ?: 0;
+        set_transient('alo_bunnycdn_active_uploads', $active_uploads + 1, 300); // 5 minutes timeout
+    }
+    
+    /**
+     * Decrement active upload counter
+     */
+    private function decrement_active_uploads() {
+        $active_uploads = get_transient('alo_bunnycdn_active_uploads') ?: 0;
+        if ($active_uploads > 0) {
+            set_transient('alo_bunnycdn_active_uploads', $active_uploads - 1, 300);
+        }
+    }
+    
+    /**
      * Upload a file to BunnyCDN storage
      * 
      * @param string $local_path Full local file path
@@ -193,12 +232,24 @@ class BunnyCDNManager {
             $this->track_upload_attempt($attachment_id);
         }
         
+        // Check for upload throttling to prevent server overload
+        if ($this->should_throttle_upload()) {
+            if ($attachment_id) {
+                $this->track_upload_status($attachment_id, 'error: throttled (too many concurrent uploads)');
+            }
+            return false;
+        }
+        
+        // Increment active upload counter
+        $this->increment_active_uploads();
+        
         // Check permissions for admin-initiated uploads
         if (is_admin() && !current_user_can('manage_options')) {
             error_log('ALO: BunnyCDN upload failed - insufficient permissions');
             if ($attachment_id) {
                 $this->track_upload_status($attachment_id, 'error: insufficient permissions');
             }
+            $this->decrement_active_uploads();
             return false;
         }
         
@@ -207,6 +258,7 @@ class BunnyCDNManager {
             if ($attachment_id) {
                 $this->track_upload_status($attachment_id, 'error: not enabled or configured');
             }
+            $this->decrement_active_uploads();
             return false;
         }
         
@@ -216,6 +268,7 @@ class BunnyCDNManager {
             if ($attachment_id) {
                 $this->track_upload_status($attachment_id, 'error: file not found or not readable');
             }
+            $this->decrement_active_uploads();
             return false;
         }
         
@@ -226,6 +279,9 @@ class BunnyCDNManager {
         // Build API endpoint URL
         $api_url = $this->build_storage_api_url($filename);
         
+        // Get file size for performance calculations
+        $file_size = filesize($local_path);
+        
         // Read file content
         $file_content = file_get_contents($local_path);
         if ($file_content === false) {
@@ -233,8 +289,13 @@ class BunnyCDNManager {
             if ($attachment_id) {
                 $this->track_upload_status($attachment_id, 'error: could not read file content');
             }
+            $this->decrement_active_uploads();
             return false;
         }
+        
+        // Calculate adaptive timeout based on file size (minimum 30s, maximum 120s)
+        // Formula: 30s base + 1s per 100KB, capped at 120s
+        $adaptive_timeout = max(30, min(120, 30 + ($file_size / 102400)));
         
         // Prepare headers
         $headers = [
@@ -248,33 +309,55 @@ class BunnyCDNManager {
             'method' => 'PUT',
             'headers' => $headers,
             'body' => $file_content,
-            'timeout' => 60, // Increased timeout for large files
+            'timeout' => $adaptive_timeout, // Adaptive timeout based on file size
             'user-agent' => 'AttachmentLookupOptimizer/' . ALO_VERSION,
             'compress' => false, // Disable compression for faster uploads
             'decompress' => false, // Disable decompression
             'stream' => false, // Keep false for PUT requests
             'sslverify' => true,
+            'redirection' => 0, // Disable redirects for faster upload
         ];
         
-        error_log('ALO: BunnyCDN uploading file to: ' . $api_url . ' (size: ' . strlen($file_content) . ' bytes)');
+        // Performance logging
+        $upload_start_time = microtime(true);
+        $memory_before = memory_get_usage();
+        
+        error_log('ALO: BunnyCDN uploading file to: ' . $api_url . ' (size: ' . strlen($file_content) . ' bytes, timeout: ' . $adaptive_timeout . 's)');
+        
+        // Check if file is very large and might cause memory issues
+        if ($file_size > 50 * 1024 * 1024) { // 50MB
+            error_log('ALO: BunnyCDN warning - uploading large file (' . round($file_size / 1024 / 1024, 2) . 'MB), monitor for memory/timeout issues');
+        }
         
         // Make the API request
         $response = wp_remote_request($api_url, $args);
         
+        // Performance metrics
+        $upload_time = microtime(true) - $upload_start_time;
+        $memory_used = memory_get_usage() - $memory_before;
+        
         // Check for request errors
         if (is_wp_error($response)) {
             $error_message = $response->get_error_message();
-            error_log('ALO: BunnyCDN upload failed - request error: ' . $error_message);
+            
+            // Log performance metrics even for errors
+            $throughput_mbps = ($file_size / 1024 / 1024) / max($upload_time, 0.1);
+            error_log(sprintf('ALO: BunnyCDN upload failed - request error: %s (%.2fs, %.2f MB/s, memory: %s)', 
+                $error_message, $upload_time, $throughput_mbps, size_format($memory_used)));
+                
             if ($attachment_id) {
                 // Determine specific error type
                 $status = 'error: request failed';
-                if (strpos($error_message, 'timeout') !== false) {
-                    $status = 'error: timeout';
+                if (strpos($error_message, 'timeout') !== false || strpos($error_message, 'timed out') !== false) {
+                    $status = 'error: timeout (' . round($upload_time, 1) . 's)';
                 } elseif (strpos($error_message, 'connection') !== false) {
                     $status = 'error: connection failed';
+                } elseif (strpos($error_message, 'SSL') !== false) {
+                    $status = 'error: SSL/certificate issue';
                 }
                 $this->track_upload_status($attachment_id, $status);
             }
+            $this->decrement_active_uploads();
             return false;
         }
         
@@ -285,19 +368,29 @@ class BunnyCDNManager {
         if ($response_code >= 200 && $response_code < 300) {
             // Success - build and return CDN URL
             $cdn_url = $this->build_cdn_url($filename);
-            error_log('ALO: BunnyCDN upload successful - CDN URL: ' . $cdn_url);
+            
+            // Log performance metrics
+            $throughput_mbps = ($file_size / 1024 / 1024) / max($upload_time, 0.1); // MB/s
+            error_log(sprintf('ALO: BunnyCDN upload successful - CDN URL: %s (%.2fs, %.2f MB/s, memory: %s)', 
+                $cdn_url, $upload_time, $throughput_mbps, size_format($memory_used)));
+                
             if ($attachment_id) {
                 $this->track_upload_status($attachment_id, 'success');
                 
-                // Delete local files if offload is enabled
+                // Schedule delayed local file deletion if offload is enabled
+                // This prevents WordPress core from encountering missing files during processing
                 if (get_option('alo_bunnycdn_offload_enabled', false)) {
-                    $this->delete_local_files_after_upload($attachment_id);
+                    $this->schedule_delayed_file_deletion($attachment_id);
                 }
             }
+            $this->decrement_active_uploads();
             return $cdn_url;
         } else {
-            // Error - log details
-            error_log('ALO: BunnyCDN upload failed - HTTP ' . $response_code . ': ' . $response_body);
+            // Error - log details with performance metrics
+            $throughput_mbps = ($file_size / 1024 / 1024) / max($upload_time, 0.1);
+            error_log(sprintf('ALO: BunnyCDN upload failed - HTTP %d: %s (%.2fs, %.2f MB/s, memory: %s)', 
+                $response_code, $response_body, $upload_time, $throughput_mbps, size_format($memory_used)));
+                
             if ($attachment_id) {
                 // Determine specific HTTP error type
                 $status = 'error: HTTP ' . $response_code;
@@ -309,9 +402,14 @@ class BunnyCDNManager {
                     $status = 'error: not found';
                 } elseif ($response_code >= 500) {
                     $status = 'error: server error';
+                } elseif ($response_code === 413) {
+                    $status = 'error: file too large';
+                } elseif ($response_code === 429) {
+                    $status = 'error: rate limited';
                 }
                 $this->track_upload_status($attachment_id, $status);
             }
+            $this->decrement_active_uploads();
             return false;
         }
     }
@@ -743,6 +841,45 @@ class BunnyCDNManager {
             $metadata['height'],         // Height - original dimensions  
             false                        // Not an intermediate size - it's the original
         ];
+    }
+    
+    /**
+     * Schedule delayed file deletion after WordPress processing is complete
+     * 
+     * @param int $attachment_id Attachment post ID
+     */
+    private function schedule_delayed_file_deletion($attachment_id) {
+        if (!$attachment_id || get_post_type($attachment_id) !== 'attachment') {
+            return;
+        }
+        
+        // Mark this attachment for delayed deletion
+        update_post_meta($attachment_id, '_alo_pending_offload', true);
+        
+        error_log("ALO: BunnyCDN Manager - scheduled delayed offload for attachment {$attachment_id}");
+    }
+    
+    /**
+     * Handle completion of WordPress attachment metadata generation
+     * This runs after WordPress has finished processing the uploaded file
+     * 
+     * @param array $metadata Attachment metadata
+     * @param int $attachment_id Attachment post ID
+     * @return array Unchanged metadata
+     */
+    public function handle_metadata_generation_complete($metadata, $attachment_id) {
+        // Check if this attachment is marked for delayed deletion
+        $pending_offload = get_post_meta($attachment_id, '_alo_pending_offload', true);
+        
+        if ($pending_offload) {
+            // Remove the pending flag
+            delete_post_meta($attachment_id, '_alo_pending_offload');
+            
+            // Now it's safe to delete local files
+            $this->delete_local_files_after_upload($attachment_id);
+        }
+        
+        return $metadata;
     }
     
     /**

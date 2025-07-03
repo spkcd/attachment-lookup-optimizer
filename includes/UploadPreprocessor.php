@@ -78,11 +78,18 @@ class UploadPreprocessor {
         // Hook into attachment creation to process new attachments
         add_action('add_attachment', [$this, 'process_new_attachment'], 20);
         
+        // Hook into attachment metadata generation completion for delayed file deletion
+        add_filter('wp_generate_attachment_metadata', [$this, 'handle_metadata_generation_complete'], 99, 2);
+        
         // Add AJAX handler for bulk processing
         add_action('wp_ajax_alo_bulk_process_upload_preprocessor', [$this, 'ajax_bulk_process_attachments']);
         
         // Hook into background processing
         add_action('alo_background_upload_processing', [$this, 'background_process_attachments']);
+        
+        // Async upload processing hooks
+        add_action('alo_process_async_uploads', [$this, 'process_async_uploads']);
+        add_action('alo_cleanup_async_queue', [$this, 'cleanup_async_upload_queue']);
         
         // Only clear stats cache on significant changes that affect stats
         add_action('add_attachment', [$this, 'maybe_clear_stats_cache_on_attachment_add']);
@@ -117,16 +124,22 @@ class UploadPreprocessor {
         if (!$upload_info) {
             // Fallback: generate from attachment metadata
             $this->generate_reverse_mapping_from_metadata($attachment_id);
-            // Try to upload to BunnyCDN even for fallback cases
-            $this->upload_to_bunnycdn($attachment_id);
+            // Try to upload to BunnyCDN even for fallback cases - async to prevent timeouts
+            $fallback_info = [
+                'file_path' => get_attached_file($attachment_id),
+                'url' => wp_get_attachment_url($attachment_id),
+                'source' => self::SOURCE_WORDPRESS,
+                'generated' => true
+            ];
+            $this->schedule_async_upload($attachment_id, $fallback_info);
             return;
         }
         
         // Store the reverse mapping
         $this->store_reverse_mapping($attachment_id, $upload_info);
         
-        // Upload to BunnyCDN if enabled
-        $this->upload_to_bunnycdn($attachment_id, $upload_info);
+        // Schedule async BunnyCDN upload to prevent timeouts
+        $this->schedule_async_upload($attachment_id, $upload_info);
         
         // Clean up stored info
         $this->clear_stored_upload_info();
@@ -155,8 +168,8 @@ class UploadPreprocessor {
         // Store the reverse mapping immediately
         $this->store_reverse_mapping($attachment_id, $upload_info);
         
-        // Upload to BunnyCDN if enabled
-        $this->upload_to_bunnycdn($attachment_id, $upload_info);
+        // Schedule asynchronous BunnyCDN upload to prevent form timeouts
+        $this->schedule_async_upload($attachment_id, $upload_info);
     }
     
     /**
@@ -622,6 +635,170 @@ class UploadPreprocessor {
     }
     
     /**
+     * Schedule asynchronous BunnyCDN upload to prevent form submission timeouts
+     * 
+     * @param int $attachment_id Attachment post ID
+     * @param array $upload_info Upload information
+     */
+    private function schedule_async_upload($attachment_id, $upload_info) {
+        // Check if BunnyCDN manager is available and enabled
+        if (!$this->bunny_cdn_manager || !$this->bunny_cdn_manager->is_enabled()) {
+            error_log("ALO: BunnyCDN not enabled, skipping async upload for attachment {$attachment_id}");
+            return false;
+        }
+        
+        // Store upload info for background processing
+        $queue_key = 'alo_async_upload_' . $attachment_id;
+        $queue_data = [
+            'attachment_id' => $attachment_id,
+            'upload_info' => $upload_info,
+            'scheduled_at' => time(),
+            'attempts' => 0,
+            'max_attempts' => 3
+        ];
+        
+        // Store in database for persistence
+        update_option($queue_key, $queue_data, false); // No autoload
+        
+        // Schedule immediate processing via AJAX if possible, otherwise via cron
+        if (!wp_doing_cron() && !wp_doing_ajax()) {
+            // Schedule immediate background processing
+            wp_schedule_single_event(time(), 'alo_process_async_uploads');
+        }
+        
+        error_log("ALO: Scheduled async BunnyCDN upload for attachment {$attachment_id}");
+        return true;
+    }
+    
+    /**
+     * Process queued asynchronous uploads
+     */
+    public function process_async_uploads() {
+        global $wpdb;
+        
+        // Find all queued uploads
+        $queued_uploads = $wpdb->get_results(
+            "SELECT option_name, option_value 
+             FROM {$wpdb->options} 
+             WHERE option_name LIKE 'alo_async_upload_%'
+             ORDER BY option_id ASC
+             LIMIT 10" // Process up to 10 uploads per batch
+        );
+        
+        if (empty($queued_uploads)) {
+            error_log("ALO: No async uploads queued");
+            return;
+        }
+        
+        $processed = 0;
+        $failed = 0;
+        
+        foreach ($queued_uploads as $queue_item) {
+            $queue_data = maybe_unserialize($queue_item->option_value);
+            
+            if (!$queue_data || !isset($queue_data['attachment_id'])) {
+                // Remove invalid queue item
+                delete_option($queue_item->option_name);
+                continue;
+            }
+            
+            $attachment_id = $queue_data['attachment_id'];
+            $upload_info = $queue_data['upload_info'];
+            $attempts = $queue_data['attempts'] ?? 0;
+            $max_attempts = $queue_data['max_attempts'] ?? 3;
+            
+            // Check if attachment still exists
+            if (!get_post($attachment_id)) {
+                error_log("ALO: Attachment {$attachment_id} no longer exists, removing from queue");
+                delete_option($queue_item->option_name);
+                continue;
+            }
+            
+            // Check if already uploaded
+            if ($this->has_bunnycdn_upload($attachment_id)) {
+                error_log("ALO: Attachment {$attachment_id} already uploaded to BunnyCDN, removing from queue");
+                delete_option($queue_item->option_name);
+                continue;
+            }
+            
+            // Attempt upload
+            error_log("ALO: Processing async upload for attachment {$attachment_id} (attempt " . ($attempts + 1) . "/{$max_attempts})");
+            
+            $start_time = microtime(true);
+            $result = $this->upload_to_bunnycdn($attachment_id, $upload_info);
+            $upload_time = microtime(true) - $start_time;
+            
+            if ($result) {
+                // Success - remove from queue
+                delete_option($queue_item->option_name);
+                $processed++;
+                error_log("ALO: Async upload successful for attachment {$attachment_id} in " . round($upload_time, 2) . "s");
+            } else {
+                // Failed - increment attempts or remove if max reached
+                $attempts++;
+                if ($attempts >= $max_attempts) {
+                    error_log("ALO: Async upload failed for attachment {$attachment_id} after {$max_attempts} attempts, removing from queue");
+                    delete_option($queue_item->option_name);
+                    $failed++;
+                } else {
+                    // Update queue with incremented attempts and exponential backoff
+                    $queue_data['attempts'] = $attempts;
+                    $queue_data['next_attempt'] = time() + (60 * pow(2, $attempts - 1)); // 1min, 2min, 4min delays
+                    update_option($queue_item->option_name, $queue_data, false);
+                    error_log("ALO: Async upload failed for attachment {$attachment_id}, will retry (attempt {$attempts}/{$max_attempts})");
+                }
+            }
+        }
+        
+        if ($processed > 0 || $failed > 0) {
+            error_log("ALO: Async upload batch complete - {$processed} successful, {$failed} failed");
+        }
+        
+        // Schedule next batch if there are more uploads waiting
+        $remaining = $wpdb->get_var(
+            "SELECT COUNT(*) 
+             FROM {$wpdb->options} 
+             WHERE option_name LIKE 'alo_async_upload_%'"
+        );
+        
+        if ($remaining > 0) {
+            // Schedule next batch in 30 seconds
+            wp_schedule_single_event(time() + 30, 'alo_process_async_uploads');
+            error_log("ALO: Scheduled next async upload batch ({$remaining} uploads remaining)");
+        }
+    }
+    
+    /**
+     * Clean up old/stale upload queue items
+     */
+    public function cleanup_async_upload_queue() {
+        global $wpdb;
+        
+        // Remove queue items older than 24 hours
+        $old_items = $wpdb->get_results(
+            "SELECT option_name, option_value 
+             FROM {$wpdb->options} 
+             WHERE option_name LIKE 'alo_async_upload_%'"
+        );
+        
+        $cleaned = 0;
+        foreach ($old_items as $item) {
+            $queue_data = maybe_unserialize($item->option_value);
+            if ($queue_data && isset($queue_data['scheduled_at'])) {
+                // Remove items older than 24 hours
+                if (time() - $queue_data['scheduled_at'] > 86400) {
+                    delete_option($item->option_name);
+                    $cleaned++;
+                }
+            }
+        }
+        
+        if ($cleaned > 0) {
+            error_log("ALO: Cleaned up {$cleaned} stale async upload queue items");
+        }
+    }
+    
+    /**
      * Upload attachment to BunnyCDN
      */
     private function upload_to_bunnycdn($attachment_id, $upload_info = null) {
@@ -670,10 +847,8 @@ class UploadPreprocessor {
                 // Rewrite post content URLs if enabled
                 $this->rewrite_post_content_urls($attachment_id, $cdn_url);
                 
-                // Delete local files if offload is enabled
-                if (get_option('alo_bunnycdn_offload_enabled', false)) {
-                    $this->delete_local_files_after_upload($attachment_id);
-                }
+                // Note: BunnyCDN Manager already handles delayed offload scheduling in upload_file()
+                // No need to schedule again here to avoid duplication
                 
                 // Log successful upload
                 error_log("ALO: Successfully uploaded attachment {$attachment_id} to BunnyCDN: {$cdn_url}");
@@ -717,6 +892,45 @@ class UploadPreprocessor {
         } catch (Exception $e) {
             error_log("ALO: Upload preprocessor - content rewriter error for attachment {$attachment_id}: " . $e->getMessage());
         }
+    }
+    
+    /**
+     * Schedule delayed file deletion after WordPress processing is complete
+     * 
+     * @param int $attachment_id Attachment post ID
+     */
+    private function schedule_delayed_file_deletion($attachment_id) {
+        if (!$attachment_id || get_post_type($attachment_id) !== 'attachment') {
+            return;
+        }
+        
+        // Mark this attachment for delayed deletion
+        update_post_meta($attachment_id, '_alo_pending_offload', true);
+        
+        error_log("ALO: Upload preprocessor - scheduled delayed offload for attachment {$attachment_id}");
+    }
+    
+    /**
+     * Handle completion of WordPress attachment metadata generation
+     * This runs after WordPress has finished processing the uploaded file
+     * 
+     * @param array $metadata Attachment metadata
+     * @param int $attachment_id Attachment post ID
+     * @return array Unchanged metadata
+     */
+    public function handle_metadata_generation_complete($metadata, $attachment_id) {
+        // Check if this attachment is marked for delayed deletion
+        $pending_offload = get_post_meta($attachment_id, '_alo_pending_offload', true);
+        
+        if ($pending_offload) {
+            // Remove the pending flag
+            delete_post_meta($attachment_id, '_alo_pending_offload');
+            
+            // Now it's safe to delete local files
+            $this->delete_local_files_after_upload($attachment_id);
+        }
+        
+        return $metadata;
     }
     
     /**
